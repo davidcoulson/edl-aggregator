@@ -1,0 +1,89 @@
+# edl-aggregator configuration
+#
+# [sources.<name>]  where indicators come from
+#   url          download URL                     (or `entries = [...]` for an inline list)
+#   format       plain | spamhaus-json | dshield | aws-json
+#   confidence   0-100, used by feeds' min/max_confidence (default 100)
+#   min_entries  a download with fewer entries is treated as a failure and the last good copy is kept
+#   service / region   aws-json only: filter ip-ranges.json (string or list)
+#
+# [feeds.<name>]  what is published at /feeds/<name>
+#   sources         sources to merge
+#   exclude         sources to subtract (allow-lists)
+#   family          ipv4 | ipv6 | both (default both)
+#   min_confidence / max_confidence   only include sources in this range
+#   aliases         extra names served with the same content (e.g. old MineMeld feed names)
+
+refresh_minutes = 60          # Spamhaus asks for no more than one download per hour
+
+# ---------------------------------------------------------------- sources
+
+[sources.spamhaus_drop_v4]
+url = "https://www.spamhaus.org/drop/drop_v4.json"   # DROP; EDROP was merged into DROP in 2024
+format = "spamhaus-json"
+confidence = 100
+min_entries = 100
+
+[sources.spamhaus_drop_v6]
+url = "https://www.spamhaus.org/drop/drop_v6.json"
+format = "spamhaus-json"
+confidence = 100
+min_entries = 10
+
+[sources.dshield]
+url = "https://feeds.dshield.org/block.txt"           # top 20 attacking /24s
+format = "dshield"
+confidence = 100
+min_entries = 5
+
+[sources.aws_s3]
+url = "https://ip-ranges.amazonaws.com/ip-ranges.json"
+format = "aws-json"
+service = "S3"
+min_entries = 100
+
+[sources.allowlist]
+entries = []                  # e.g. ["203.0.113.0/24", "198.51.100.7"]
+
+# ---------------------------------------------------------------- feeds
+
+[feeds.inbound-block-v4]
+description = "Spamhaus DROP + DShield, IPv4, minus allowlist"
+sources = ["spamhaus_drop_v4", "dshield"]
+exclude = ["allowlist"]
+family = "ipv4"
+min_confidence = 76
+aliases = ["inboundfeedhc"]   # MineMeld high-confidence inbound feed name
+
+[feeds.inbound-block-v6]
+description = "Spamhaus DROP, IPv6, minus allowlist"
+sources = ["spamhaus_drop_v6"]
+exclude = ["allowlist"]
+family = "ipv6"
+
+[feeds.inbound-block-mc]
+description = "Medium-confidence inbound IPv4 (empty unless a source has confidence 50-75)"
+sources = ["spamhaus_drop_v4", "dshield"]
+exclude = ["allowlist"]
+family = "ipv4"
+min_confidence = 50
+max_confidence = 75
+aliases = ["inboundfeedmc"]
+
+[feeds.inbound-block-lc]
+description = "Low-confidence inbound IPv4 (empty unless a source has confidence < 50)"
+sources = ["spamhaus_drop_v4", "dshield"]
+exclude = ["allowlist"]
+family = "ipv4"
+max_confidence = 49
+aliases = ["inboundfeedlc"]
+
+[feeds.aws-s3-v4]
+description = "AWS S3 address ranges, IPv4"
+sources = ["aws_s3"]
+family = "ipv4"
+aliases = ["node-1612106016582"]   # MineMeld AWS S3 output node (was IPv4 only)
+
+[feeds.aws-s3]
+description = "AWS S3 address ranges, IPv4 + IPv6"
+sources = ["aws_s3"]

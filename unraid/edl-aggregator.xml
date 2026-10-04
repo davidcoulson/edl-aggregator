@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>edl-aggregator</Name>
+  <Repository>ghcr.io/davidcoulson/edl-aggregator:latest</Repository>
+  <Registry>https://github.com/davidcoulson/edl-aggregator/pkgs/container/edl-aggregator</Registry>
+  <Network>bridge</Network>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/davidcoulson/edl-aggregator/issues</Support>
+  <Project>https://github.com/davidcoulson/edl-aggregator</Project>
+  <Overview>Merge IP threat feeds (Spamhaus DROP, DShield, AWS ranges, plain lists) and serve them as firewall External Dynamic Lists. A lightweight MineMeld replacement. Edit /config/config.toml after first start.</Overview>
+  <Category>Network:Security Tools:</Category>
+  <WebUI>http://[IP]:[PORT:80]/</WebUI>
+  <Icon>https://raw.githubusercontent.com/davidcoulson/edl-aggregator/main/unraid/icon.png</Icon>
+  <Config Name="HTTP port" Target="80" Default="8080" Mode="tcp" Description="Plain-text feeds over HTTP" Type="Port" Display="always" Required="false"/>
+  <Config Name="HTTPS port" Target="443" Default="8443" Mode="tcp" Description="Feeds over HTTPS (self-signed certificate unless you provide one)" Type="Port" Display="always" Required="false"/>
+  <Config Name="Config" Target="/config" Default="/mnt/user/appdata/edl-aggregator/config" Mode="rw" Description="config.toml" Type="Path" Display="always" Required="true"/>
+  <Config Name="Data" Target="/data" Default="/mnt/user/appdata/edl-aggregator/data" Mode="rw" Description="Cache of last good feed data and TLS certificate" Type="Path" Display="always" Required="true"/>
+  <Config Name="Refresh log level" Target="LOG_LEVEL" Default="INFO" Mode="" Description="DEBUG, INFO, WARNING" Type="Variable" Display="advanced" Required="false"/>
+</Container>

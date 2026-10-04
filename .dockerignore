@@ -1,0 +1,8 @@
+.git
+.github
+tests
+unraid
+__pycache__
+*.md
+!README.md
+.DS_Store
