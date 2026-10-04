@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 log = logging.getLogger("edl-aggregator")
 USER_AGENT = f"edl-aggregator/{__version__} (+https://github.com/davidcoulson/edl-aggregator)"

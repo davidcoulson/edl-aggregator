@@ -4,8 +4,9 @@ Merge public IP threat feeds and serve them as **External Dynamic Lists** (EDLs)
 A lightweight replacement for the most common use of Palo Alto **MineMeld** (discontinued), in one
 Python file with no dependencies beyond the standard library.
 
-- Sources: **Spamhaus DROP** (JSON; EDROP is merged into DROP), **DShield** block list, **AWS ip-ranges.json**
-  (filter by service/region), any **plain-text** list (IPs, CIDRs, `a-b` ranges, comments), or inline entries.
+- Sources: **Spamhaus DROP** (JSON; EDROP is merged into DROP), **DShield** block list, **Team Cymru full bogons**,
+  **AWS ip-ranges.json** (filter by service/region), any **plain-text** list (IPs, CIDRs, `a-b` ranges, comments),
+  or inline entries.
 - Feeds: merge any sources, subtract allow-lists, filter by IP family and confidence, collapse to the fewest CIDRs.
 - Safe by default: a source that fails to download, or returns fewer than `min_entries`, keeps its last good copy,
   so an upstream outage never silently empties your block list.
@@ -68,6 +69,17 @@ aliases = ["inboundfeedhc"]      # old MineMeld name
 ```
 
 Source formats: `plain`, `spamhaus-json`, `dshield`, `aws-json` (`service`, `region` filters).
+
+## Bogon feeds
+
+`bogons-v4` / `bogons-v6` publish Team Cymru's *full bogons*: unallocated and reserved address space. They include
+RFC 1918, `100.64.0.0/10` (CGNAT, also Tailscale), loopback and multicast, so use them **only as a source match on
+internet-facing zones** (drop spoofed or unallocated sources from outside), never on internal zones or as a
+destination. Add ranges to `[sources.bogon_exceptions]` to carve anything out.
+
+Size: `bogons-v4` is about 3,000 prefixes, but `bogons-v6` is about 150,000, which exceeds the per-list limit of many
+firewalls (e.g. Palo Alto EDLs are typically capped around 50,000 IP entries per list, varying by model). Check your
+platform's limit before using the IPv6 list.
 
 ## Migrating from MineMeld
 

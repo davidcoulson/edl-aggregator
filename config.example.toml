@@ -45,7 +45,25 @@ min_entries = 100
 [sources.allowlist]
 entries = []                  # e.g. ["203.0.113.0/24", "198.51.100.7"]
 
+[sources.teamcymru_fullbogons_v4]
+url = "https://www.team-cymru.org/Services/Bogons/fullbogons-ipv4.txt"   # unallocated + reserved space, updated every 4 h
+format = "plain"
+min_entries = 1000
+
+[sources.teamcymru_fullbogons_v6]
+url = "https://www.team-cymru.org/Services/Bogons/fullbogons-ipv6.txt"
+format = "plain"
+min_entries = 1000
+
+[sources.bogon_exceptions]
+# Ranges to keep OUT of the bogon feeds. Full bogons include RFC 1918, 100.64.0.0/10 (CGNAT, also used by
+# Tailscale), loopback and multicast - correct for "drop spoofed sources arriving from the internet", but
+# add ranges here if the list is ever used somewhere your own addresses could match.
+entries = []                  # e.g. ["100.64.0.0/10"]
+
 # ---------------------------------------------------------------- feeds
+# Threat feeds (block on any rule) and bogon feeds (use ONLY as a source match on internet-facing zones)
+# are kept separate on purpose.
 
 [feeds.inbound-block-v4]
 description = "Spamhaus DROP + DShield, IPv4, minus allowlist"
@@ -87,3 +105,15 @@ aliases = ["node-1612106016582"]   # MineMeld AWS S3 output node (was IPv4 only)
 [feeds.aws-s3]
 description = "AWS S3 address ranges, IPv4 + IPv6"
 sources = ["aws_s3"]
+
+[feeds.bogons-v4]
+description = "Team Cymru full bogons, IPv4 - source match on internet-facing zones only"
+sources = ["teamcymru_fullbogons_v4"]
+exclude = ["bogon_exceptions"]
+family = "ipv4"
+
+[feeds.bogons-v6]
+description = "Team Cymru full bogons, IPv6 - source match on internet-facing zones only"
+sources = ["teamcymru_fullbogons_v6"]
+exclude = ["bogon_exceptions"]
+family = "ipv6"
