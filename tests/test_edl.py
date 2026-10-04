@@ -158,6 +158,44 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(e.parse_plain("http://x.test/a;b,c\n", item_type="url"), ["http://x.test/a;b,c"])
 
 
+class CsvAndAsnTests(unittest.TestCase):
+    def test_csv_column_and_threshold(self):
+        text = ('# "first_seen","id","ioc","type","x","y","z","w","v","confidence"\n'
+                '"2026-10-04", "1", "46.246.6.4:2703", "ip:port", "c", "f", "n", "A", "", "75"\n'
+                '"2026-10-04", "2", "45.86.60.114:5656", "ip:port", "c", "f", "n", "B", "", "50"\n')
+        self.assertEqual(ips(e.parse_csv(text, column=2, min_column=9, min_value=75)), [N("46.246.6.4/32")])
+        self.assertEqual(len(e.parse_csv(text, column=2)), 2)
+
+    def test_asn_drop_expansion(self):
+        filler = "".join(f"10.{i // 256}.{i % 256}.0\t10.{i // 256}.{i % 256}.255\t64512\tZZ\tFILL\n" for i in range(1100))
+        db = ("1.0.0.0\t1.0.0.255\t13335\tUS\tCLOUDFLARENET\n"
+              "198.51.100.0\t198.51.100.255\t64666\tXX\tBADNET\n"
+              "203.0.113.0\t203.0.113.127\t64666\tXX\tBADNET\n"
+              "2001:db8:bad::\t2001:db8:bad:ffff:ffff:ffff:ffff:ffff\t64666\tXX\tBADNET\n" + filler)
+        asn_up, db_up = Upstream(), Upstream()
+        try:
+            asn_up.body = '{"asn":64666,"asname":"BADNET"}\n{"asn":64999,"asname":"GONE"}\n{"type":"metadata"}\n'
+            db_up.body = db
+            cfg = {"sources": {"a": {"url": asn_up.url, "format": "spamhaus-asn-json", "asn_database": db_up.url,
+                                     "min_entries": 2}},
+                   "feeds": {"f": {"sources": ["a"]}}}
+            with tempfile.TemporaryDirectory() as d:
+                agg = make(cfg, d)
+                agg.tick(force=True)
+                self.assertTrue(agg.sources["a"].status["ok"], agg.sources["a"].status["error"])
+                self.assertEqual(agg.get("f").text,
+                                 "198.51.100.0/24\n203.0.113.0/25\n2001:db8:bad::/48\n")
+                db_up.status = 500                      # database download fails -> cached copy is used
+                os.utime(next(Path(d, "cache").glob("asn-db-*.tsv")), (0, 0))
+                asn_up.etag = '"v2"'
+                agg.tick(force=True)
+                self.assertTrue(agg.sources["a"].status["ok"])
+                self.assertEqual(agg.get("f").count, 3)
+        finally:
+            asn_up.close()
+            db_up.close()
+
+
 class SetTests(unittest.TestCase):
     def test_subtract(self):
         self.assertEqual(e.collapse(e.subtract([N("10.0.0.0/24")], [N("10.0.0.128/25")])), [N("10.0.0.0/25")])

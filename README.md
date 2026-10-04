@@ -9,10 +9,11 @@ or anything that can poll a URL for a list.
 
 ## Features
 
-- **IP sources**: Spamhaus DROP (v4/v6), DShield, Emerging Threats, CINS Army, IPsum, GreenSnow, blocklist.de,
-  abuse.ch Feodo, Tor exits (v4/v6), AbuseIPDB and CrowdSec (keys), Team Cymru bogons, AWS / Cloudflare / Google /
-  Google Cloud / GitHub / Fastly / Microsoft 365 / UptimeRobot ranges - or any plain-text or JSON list.
-- **Domain and URL sources**: abuse.ch URLhaus (URLs + domains) and ThreatFox, OpenPhish, Phishing Army, Hagezi
+- **IP sources**: Spamhaus DROP (v4/v6) and ASN-DROP (expanded to announced ranges), DShield, Emerging Threats,
+  CINS Army, IPsum, GreenSnow, blocklist.de, abuse.ch Feodo and ThreatFox C2, Tor exits (v4/v6), AbuseIPDB and
+  CrowdSec (accounts), Team Cymru bogons, AWS / Cloudflare / Google / Google Cloud / GitHub / Fastly /
+  Microsoft 365 / UptimeRobot ranges - or any plain-text, CSV or JSON list.
+- **Domain and URL sources**: abuse.ch URLhaus (URLs + domains) and ThreatFox (URLs + domains), OpenPhish, Phishing Army, Hagezi
   Threat Intelligence, Microsoft 365 domains - plain, hosts-file or JSON. URLs are published in Palo Alto URL-EDL
   form (no scheme).
 - **Dynamic lists**: add or remove entries at runtime through an authenticated API, with optional expiry - for
@@ -98,9 +99,30 @@ kind = "allow"
 sources = ["github_hooks"]
 ```
 
-Source formats: `plain`, `hosts` (hosts-file), `spamhaus-json`, `dshield`, `aws-json` (`service`, `region`), and `json` with `paths`
+Source formats: `plain`, `hosts` (hosts-file), `csv` (`column`, optional `min_column`/`min_value` threshold),
+`spamhaus-json`, `spamhaus-asn-json`, `dshield`, `aws-json` (`service`, `region`), and `json` with `paths`
 (`"prefixes[].ipv6Prefix"`, `"[].ips[]"`; `[]` iterates a list) and an optional `where` filter. Entries may be IPs,
 CIDRs, `a-b` ranges, `[v6]:port` or `v4:port`.
+
+## ASN expansion
+
+`expand_asns = true` (automatic for `format = "spamhaus-asn-json"`) treats a source's entries as AS numbers and
+publishes every range those networks announce, using an ip2asn-style database - by default the free
+[iptoasn.com](https://iptoasn.com) combined IPv4/IPv6 table (about 9 MB, re-downloaded daily and cached; a failed
+download keeps using the cached copy). Override with `asn_database` / `asn_database_refresh_minutes`.
+
+## Sources that need an account
+
+Everything in the example config works without an account except these, which ship disabled:
+
+| Source | Account | What to set |
+|---|---|---|
+| AbuseIPDB (`abuseipdb_v4`, `abuseipdb_v6`) | free account at abuseipdb.com -> API key. Free tier: 5 blacklist downloads/day (the example refreshes every 6 h), 10,000 IPs per list | `ABUSEIPDB_API_KEY` env var; `enabled = true` |
+| CrowdSec (`crowdsec_blocklist`) | free CrowdSec Console account -> create a *Blocklist integration* (firewall integration) and subscribe it to blocklists | `CROWDSEC_BLOCKLIST_URL` and `CROWDSEC_BASIC_AUTH` (base64 of `user:password`); `enabled = true` |
+
+No account needed: Spamhaus DROP / ASN-DROP (free under Spamhaus' DROP terms), abuse.ch URLhaus / ThreatFox /
+Feodo (bulk exports), DShield, Emerging Threats, CINS, IPsum, GreenSnow, blocklist.de, Tor, Team Cymru,
+OpenPhish (community feed), Phishing Army, Hagezi, iptoasn.com, and all cloud/service ranges.
 
 ## Domain and URL feeds
 

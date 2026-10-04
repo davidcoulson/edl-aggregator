@@ -22,6 +22,8 @@ Safety rules:
 
 import argparse
 import base64
+import csv
+import gzip
 import hashlib
 import hmac
 import ipaddress
@@ -44,7 +46,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 log = logging.getLogger("edl-aggregator")
 USER_AGENT = f"edl-aggregator/{__version__} (+https://github.com/davidcoulson/edl-aggregator)"
@@ -337,16 +339,89 @@ def parse_json(text: str, paths=None, where=None, **_) -> list[str]:
     return out
 
 
+def parse_csv(text: str, column=0, min_column=None, min_value=None, delimiter=",", **_) -> list[str]:
+    """CSV: take `column` (0-based index). Lines starting with '#' are skipped. Optional numeric threshold:
+    keep rows where column `min_column` >= `min_value` (e.g. ThreatFox confidence_level)."""
+    out = []
+    rows = csv.reader((l for l in text.splitlines() if l.strip() and not l.lstrip().startswith("#")),
+                      delimiter=delimiter, skipinitialspace=True)
+    for row in rows:
+        if len(row) <= int(column):
+            continue
+        if min_column is not None and min_value is not None:
+            try:
+                if float(row[int(min_column)]) < float(min_value):
+                    continue
+            except (ValueError, IndexError):
+                continue
+        out.append(row[int(column)].strip())
+    return out
+
+
+def parse_spamhaus_asn_json(text: str, **_) -> list[str]:
+    """Spamhaus ASN-DROP (asndrop.json): one JSON object per line with an 'asn' key -> ['AS123', ...]."""
+    out = []
+    for line in text.splitlines():
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and "asn" in obj:
+            out.append(f"AS{obj['asn']}")
+    return out
+
+
+ASN_DB_DEFAULT = "https://iptoasn.com/data/ip2asn-combined.tsv.gz"
+_asn_db_lock = threading.Lock()
+
+
+def asn_ranges(asns: list[str], db_url: str, cache_dir: Path, refresh_minutes: float, timeout: int) -> list[str]:
+    """Expand ASNs ('AS123' or '123') to the IP ranges they announce, using an ip2asn-style TSV
+    (start, end, asn, ...; optionally gzipped). The database is cached on disk and re-downloaded when older
+    than `refresh_minutes`; a failed download falls back to the cached copy."""
+    wanted = {re.sub(r"(?i)^as", "", a.strip()) for a in asns if a.strip()}
+    path = cache_dir / f"asn-db-{hashlib.sha256(db_url.encode()).hexdigest()[:12]}.tsv"
+    with _asn_db_lock:
+        stale = not path.exists() or time.time() - path.stat().st_mtime > refresh_minutes * 60
+        if stale:
+            try:
+                req = urllib.request.Request(db_url, headers={"User-Agent": USER_AGENT})
+                with urllib.request.urlopen(req, timeout=max(timeout, 120)) as resp:
+                    data = resp.read()
+                if data[:2] == b"\x1f\x8b":
+                    data = gzip.decompress(data)
+                if data.count(b"\n") < 1000:
+                    raise ValueError("ASN database looks truncated")
+                tmp = path.with_suffix(".tmp")
+                tmp.write_bytes(data)
+                tmp.replace(path)
+                log.info("ASN database refreshed from %s (%d lines)", db_url, data.count(b"\n"))
+            except Exception as e:
+                if not path.exists():
+                    raise RuntimeError(f"ASN database unavailable: {e}") from e
+                log.warning("ASN database refresh failed, using cached copy: %s", e)
+        out = []
+        with path.open(encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                f = line.split("\t", 3)
+                if len(f) >= 3 and f[2] in wanted:
+                    out.append(f"{f[0]}-{f[1]}")
+    return out
+
+
 PARSERS = {
     "plain": parse_plain,
     "hosts": parse_hosts,
+    "csv": parse_csv,
     "spamhaus-json": parse_spamhaus_json,
+    "spamhaus-asn-json": parse_spamhaus_asn_json,
     "dshield": parse_dshield,
     "aws-json": parse_aws_json,
     "json": parse_json,
 }
 SOURCE_KEYS = {"url", "entries", "format", "type", "confidence", "min_entries", "enabled", "refresh_minutes",
-               "headers", "max_shrink_percent", "description", "timeout", "dynamic"}
+               "headers", "max_shrink_percent", "description", "timeout", "dynamic", "expand_asns",
+               "asn_database", "asn_database_refresh_minutes"}
 
 
 # --------------------------------------------------------------------------- alerts
@@ -394,6 +469,9 @@ class Source:
         self.max_shrink = float(cfg.get("max_shrink_percent", defaults["max_shrink_percent"]))
         self.timeout = int(cfg.get("timeout", 60))
         self.headers = expand_env(cfg.get("headers", {}))
+        self.expand_asns = bool(cfg.get("expand_asns", self.format == "spamhaus-asn-json"))
+        self.asn_db_url = expand_env(cfg.get("asn_database", ASN_DB_DEFAULT))
+        self.asn_db_refresh = float(cfg.get("asn_database_refresh_minutes", 1440))
         self.opts = {k: v for k, v in cfg.items() if k not in SOURCE_KEYS}
         self.cache = data_dir / "cache" / f"{name}.txt"
         self.meta_file = data_dir / "cache" / f"{name}.json"
@@ -409,6 +487,8 @@ class Source:
                        "error": None, "consecutive_failures": 0}
         if self.type not in TYPES:
             raise ValueError(f"source {name}: type must be one of {', '.join(TYPES)}")
+        if self.expand_asns and self.type != "ip":
+            raise ValueError(f"source {name}: expand_asns only works for type = ip")
         if self.format not in PARSERS:
             raise ValueError(f"source {name}: unknown format {self.format!r} (use one of {', '.join(PARSERS)})")
         if self.enabled and not self.url and self.entries_static is None and not self.dynamic:
@@ -554,13 +634,17 @@ class Source:
             self._fail(f"{type(e).__name__}: {e}")
             return False
         try:
-            parsed = to_items(self.type, PARSERS[self.format](text, item_type=self.type, **self.opts), self.opts)
+            tokens = PARSERS[self.format](text, item_type=self.type, **self.opts)
+            raw_tokens = len(tokens)
+            if self.expand_asns:
+                tokens = asn_ranges(tokens, self.asn_db_url, self.cache.parent, self.asn_db_refresh, self.timeout)
+            parsed = to_items(self.type, tokens, self.opts)
         except Exception as e:
             self._fail(f"parse error: {type(e).__name__}: {e}")
             return False
         # Size checks use the raw entry count from upstream: collapsing can legitimately merge thousands of
-        # adjacent addresses into a few prefixes.
-        raw = len(parsed)
+        # adjacent addresses into a few prefixes. For ASN lists that is the number of ASNs.
+        raw = raw_tokens if self.expand_asns else len(parsed)
         if raw < self.min_entries:
             self._fail(f"only {raw} entries (min_entries={self.min_entries})")
             return False

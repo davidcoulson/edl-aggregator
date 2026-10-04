@@ -4,7 +4,10 @@
 # [sources.<name>]  where indicators come from
 #   type                ip (default) | domain | url
 #   url / entries       download URL, or an inline list (`entries = [...]`)
-#   format              plain | hosts | spamhaus-json | dshield | aws-json | json
+#   format              plain | hosts | csv | spamhaus-json | spamhaus-asn-json | dshield | aws-json | json
+#   column, min_column, min_value   csv only: value column (0-based); keep rows where min_column >= min_value
+#   expand_asns         ip only: entries are ASNs, expanded to announced ranges via asn_database (ip2asn TSV;
+#                       default iptoasn.com, refreshed daily - asn_database_refresh_minutes)
 #   strip_scheme, max_length   url only: drop http(s):// (Palo Alto format, default true); skip longer (255)
 #   paths, where        json only: paths like "prefixes[].ipv6Prefix", "[].ips[]"; where = {key = value(s)}
 #   service, region     aws-json only: filter ip-ranges.json (string or list)
@@ -102,6 +105,22 @@ min_entries = 1000
 [sources.feodo_c2]
 url = "https://feodotracker.abuse.ch/downloads/ipblocklist_recommended.txt"   # botnet C2 servers
 min_entries = 0               # can legitimately be (nearly) empty
+
+[sources.threatfox_c2_ips]
+# abuse.ch ThreatFox botnet C2 IP:port indicators (last 48 h); ports stripped; confidence_level >= 75 only
+url = "https://threatfox.abuse.ch/export/csv/ip-port/recent/"
+format = "csv"
+column = 2
+min_column = 9
+min_value = 75
+min_entries = 100
+
+[sources.spamhaus_asndrop]
+# Spamhaus ASN-DROP: networks run by spammers/cybercriminals, expanded to the IP ranges they announce
+url = "https://www.spamhaus.org/drop/asndrop.json"
+format = "spamhaus-asn-json"
+refresh_minutes = 1440
+min_entries = 100
 
 [sources.tor_relays]
 # Exit relays with their IPv4 and IPv6 addresses (Onionoo). Ports are stripped.
@@ -257,13 +276,13 @@ aliases = ["inboundfeedlc"]
 [feeds.threat-extended]
 description = "Spamhaus + DShield + ET compromised + CINS + IPsum(3) + GreenSnow (+ AbuseIPDB if enabled), v4+v6"
 sources = ["spamhaus_drop_v4", "spamhaus_drop_v6", "dshield", "et_compromised", "cins_army", "ipsum_level3",
-           "greensnow", "abuseipdb_v4", "abuseipdb_v6"]
+           "greensnow", "abuseipdb_v4", "abuseipdb_v6", "crowdsec_blocklist"]
 exclude = ["allowlist"]
 max_entries = 50000
 
 [feeds.threat-ipv6]
-description = "IPv6 threat sources only: Spamhaus DROP v6 (+ AbuseIPDB v6 if enabled)"
-sources = ["spamhaus_drop_v6", "abuseipdb_v6"]
+description = "IPv6 threat sources: Spamhaus DROP v6 (+ AbuseIPDB v6, CrowdSec if enabled)"
+sources = ["spamhaus_drop_v6", "abuseipdb_v6", "crowdsec_blocklist"]
 exclude = ["allowlist"]
 family = "ipv6"
 
@@ -274,9 +293,15 @@ exclude = ["allowlist"]
 max_entries = 50000
 
 [feeds.c2-botnet]
-description = "abuse.ch Feodo Tracker botnet C2 - block outbound"
-sources = ["feodo_c2"]
+description = "abuse.ch Feodo Tracker + ThreatFox (confidence >= 75) botnet C2 IPs - block outbound"
+sources = ["feodo_c2", "threatfox_c2_ips"]
 exclude = ["allowlist"]
+
+[feeds.asn-drop]
+description = "Spamhaus ASN-DROP: all ranges announced by listed networks, IPv4 + IPv6"
+sources = ["spamhaus_asndrop"]
+exclude = ["allowlist"]
+max_entries = 50000
 
 [feeds.tor-exits]
 description = "Tor exit relays, IPv4 + IPv6"
@@ -419,6 +444,13 @@ url = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif
 min_entries = 1000
 refresh_minutes = 360
 
+[sources.threatfox_urls]
+type = "url"
+url = "https://threatfox.abuse.ch/export/csv/urls/recent/"   # malware/C2 URLs (last 48 h)
+format = "csv"
+column = 2
+min_entries = 10
+
 [sources.domain_allowlist]
 type = "domain"
 entries = []                  # your exceptions for domain/URL block feeds (domain + subdomains)
@@ -455,8 +487,8 @@ type = "domain"
 # ======================================================================== feeds: domain / URL
 
 [feeds.malware-urls]
-description = "URLhaus online malware URLs (Palo Alto URL EDL format, no scheme)"
-sources = ["urlhaus_urls"]
+description = "URLhaus online + ThreatFox malware URLs (Palo Alto URL EDL format, no scheme)"
+sources = ["urlhaus_urls", "threatfox_urls"]
 exclude = ["domain_allowlist"]
 max_entries = 100000
 
