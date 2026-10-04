@@ -1,40 +1,133 @@
 # edl-aggregator configuration
 #
 # [sources.<name>]  where indicators come from
-#   url          download URL                     (or `entries = [...]` for an inline list)
-#   format       plain | spamhaus-json | dshield | aws-json
-#   confidence   0-100, used by feeds' min/max_confidence (default 100)
-#   min_entries  a download with fewer entries is treated as a failure and the last good copy is kept
-#   service / region   aws-json only: filter ip-ranges.json (string or list)
+#   url / entries       download URL, or an inline list (`entries = [...]`)
+#   format              plain | spamhaus-json | dshield | aws-json | json
+#   paths, where        json only: paths like "prefixes[].ipv6Prefix", "[].ips[]"; where = {key = value(s)}
+#   service, region     aws-json only: filter ip-ranges.json (string or list)
+#   enabled             false = never fetched, contributes nothing (default true)
+#   refresh_minutes     per-source interval (default: top-level refresh_minutes)
+#   headers             extra HTTP headers; "${ENV_VAR}" is replaced from the environment (API keys)
+#   confidence          0-100, for feeds' min/max_confidence (default 100)
+#   min_entries         a download with fewer entries is a failure; the last good copy is kept
+#   max_shrink_percent  a download that shrinks more than this is a failure (default [safety] value)
 #
-# [feeds.<name>]  what is published at /feeds/<name>
-#   sources         sources to merge
-#   exclude         sources to subtract (allow-lists)
-#   family          ipv4 | ipv6 | both (default both)
-#   min_confidence / max_confidence   only include sources in this range
-#   aliases         extra names served with the same content (e.g. old MineMeld feed names)
+# [feeds.<name>]  published at /feeds/<name> (and /feeds/<alias>)
+#   sources / exclude   sources to merge / to subtract
+#   kind                block (default) | allow | bogon.  [safety] never_block is removed from block feeds only
+#   family              ipv4 | ipv6 | both (default both)
+#   min/max_confidence  only include sources in this range
+#   max_entries         size limit (0 = none). Over it: overflow = "keep-last" (serve previous build) or "serve"
+#   aliases             extra names with the same content (e.g. old MineMeld feed names)
 
-refresh_minutes = 60          # Spamhaus asks for no more than one download per hour
+refresh_minutes = 60          # default per-source interval. Spamhaus asks for no more than one download per hour.
 
-# ---------------------------------------------------------------- sources
+[safety]
+max_shrink_percent = 50
+# Never published in a block feed, whatever an upstream says. Add your own public IPs / prefixes here.
+never_block = [
+  "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",   # RFC 1918
+  "100.64.0.0/10",                                   # CGNAT / Tailscale
+  "127.0.0.0/8", "169.254.0.0/16",
+  "::1/128", "fc00::/7", "fe80::/10",
+]
+
+[alerts]
+# POSTs {"title", "body", "type"} as JSON - works with an Apprise API URL like http://apprise:8000/notify/<key>
+webhook_url = ""
+after_failures = 3
+
+
+# ======================================================================== threat sources (block)
 
 [sources.spamhaus_drop_v4]
 url = "https://www.spamhaus.org/drop/drop_v4.json"   # DROP; EDROP was merged into DROP in 2024
 format = "spamhaus-json"
-confidence = 100
 min_entries = 100
 
 [sources.spamhaus_drop_v6]
 url = "https://www.spamhaus.org/drop/drop_v6.json"
 format = "spamhaus-json"
-confidence = 100
 min_entries = 10
 
 [sources.dshield]
 url = "https://feeds.dshield.org/block.txt"           # top 20 attacking /24s
 format = "dshield"
-confidence = 100
 min_entries = 5
+
+[sources.et_compromised]
+url = "https://rules.emergingthreats.net/blockrules/compromised-ips.txt"
+min_entries = 50
+
+[sources.cins_army]
+url = "https://cinsscore.com/list/ci-badguys.txt"
+min_entries = 1000
+
+[sources.ipsum_level3]
+url = "https://raw.githubusercontent.com/stamparm/ipsum/master/levels/3.txt"   # on 3+ of ~30 blacklists
+min_entries = 1000
+
+[sources.greensnow]
+url = "https://blocklist.greensnow.co/greensnow.txt"
+min_entries = 100
+
+[sources.blocklist_de]
+url = "https://lists.blocklist.de/lists/all.txt"     # fail2ban reports - noisier
+min_entries = 1000
+
+[sources.feodo_c2]
+url = "https://feodotracker.abuse.ch/downloads/ipblocklist_recommended.txt"   # botnet C2 servers
+min_entries = 0               # can legitimately be (nearly) empty
+
+[sources.tor_relays]
+# Exit relays with their IPv4 and IPv6 addresses (Onionoo). Ports are stripped.
+url = "https://onionoo.torproject.org/details?flag=Exit&running=true&fields=or_addresses,exit_addresses"
+format = "json"
+paths = ["relays[].exit_addresses[]", "relays[].or_addresses[]"]
+min_entries = 500
+
+[sources.abuseipdb_v4]
+# Needs a free AbuseIPDB key in the ABUSEIPDB_API_KEY environment variable. Free tier: 5 downloads/day.
+enabled = false
+url = "https://api.abuseipdb.com/api/v2/blacklist?confidenceMinimum=90&ipVersion=4&plaintext"
+headers = { Key = "${ABUSEIPDB_API_KEY}", Accept = "text/plain" }
+refresh_minutes = 360
+min_entries = 100
+
+[sources.abuseipdb_v6]
+enabled = false
+url = "https://api.abuseipdb.com/api/v2/blacklist?confidenceMinimum=90&ipVersion=6&plaintext"
+headers = { Key = "${ABUSEIPDB_API_KEY}", Accept = "text/plain" }
+refresh_minutes = 360
+min_entries = 10
+
+[sources.allowlist]
+entries = []                  # your exceptions for block feeds, e.g. ["203.0.113.0/24"]
+
+
+# ======================================================================== bogon sources
+
+[sources.teamcymru_fullbogons_v4]
+url = "https://www.team-cymru.org/Services/Bogons/fullbogons-ipv4.txt"   # unallocated + reserved, updated every 4 h
+refresh_minutes = 240
+min_entries = 1000
+
+[sources.teamcymru_fullbogons_v6]
+url = "https://www.team-cymru.org/Services/Bogons/fullbogons-ipv6.txt"
+refresh_minutes = 240
+min_entries = 1000
+
+[sources.ipv6_martians]
+# Compact IPv6 bogons: everything outside global unicast 2000::/3, plus documentation/benchmarking/old 6bone
+# space inside it. A few entries instead of ~150,000 - fits any firewall.
+entries = ["::/3", "4000::/2", "8000::/1", "2001:2::/48", "2001:db8::/32", "3ffe::/16", "3fff::/20"]
+
+[sources.bogon_exceptions]
+# Ranges to keep OUT of bogon feeds (bogons include RFC 1918, 100.64.0.0/10, loopback, multicast).
+entries = []                  # e.g. ["100.64.0.0/10"]
+
+
+# ======================================================================== service ranges (allow)
 
 [sources.aws_s3]
 url = "https://ip-ranges.amazonaws.com/ip-ranges.json"
@@ -42,31 +135,72 @@ format = "aws-json"
 service = "S3"
 min_entries = 100
 
-[sources.allowlist]
-entries = []                  # e.g. ["203.0.113.0/24", "198.51.100.7"]
+[sources.aws_cloudfront]
+url = "https://ip-ranges.amazonaws.com/ip-ranges.json"
+format = "aws-json"
+service = "CLOUDFRONT"
+min_entries = 50
 
-[sources.teamcymru_fullbogons_v4]
-url = "https://www.team-cymru.org/Services/Bogons/fullbogons-ipv4.txt"   # unallocated + reserved space, updated every 4 h
-format = "plain"
-min_entries = 1000
+[sources.aws_route53_healthchecks]
+url = "https://ip-ranges.amazonaws.com/ip-ranges.json"
+format = "aws-json"
+service = "ROUTE53_HEALTHCHECKS"
+min_entries = 5
 
-[sources.teamcymru_fullbogons_v6]
-url = "https://www.team-cymru.org/Services/Bogons/fullbogons-ipv6.txt"
-format = "plain"
-min_entries = 1000
+[sources.cloudflare_v4]
+url = "https://www.cloudflare.com/ips-v4/"
+min_entries = 5
 
-[sources.bogon_exceptions]
-# Ranges to keep OUT of the bogon feeds. Full bogons include RFC 1918, 100.64.0.0/10 (CGNAT, also used by
-# Tailscale), loopback and multicast - correct for "drop spoofed sources arriving from the internet", but
-# add ranges here if the list is ever used somewhere your own addresses could match.
-entries = []                  # e.g. ["100.64.0.0/10"]
+[sources.cloudflare_v6]
+url = "https://www.cloudflare.com/ips-v6/"
+min_entries = 3
 
-# ---------------------------------------------------------------- feeds
-# Threat feeds (block on any rule) and bogon feeds (use ONLY as a source match on internet-facing zones)
-# are kept separate on purpose.
+[sources.google]
+url = "https://www.gstatic.com/ipranges/goog.json"
+format = "json"
+paths = ["prefixes[].ipv4Prefix", "prefixes[].ipv6Prefix"]
+min_entries = 20
+
+[sources.google_cloud]
+url = "https://www.gstatic.com/ipranges/cloud.json"
+format = "json"
+paths = ["prefixes[].ipv4Prefix", "prefixes[].ipv6Prefix"]
+min_entries = 100
+
+[sources.github_hooks]
+url = "https://api.github.com/meta"
+format = "json"
+paths = ["hooks[]"]
+min_entries = 2
+
+[sources.github_core]
+url = "https://api.github.com/meta"
+format = "json"
+paths = ["web[]", "api[]", "git[]"]
+min_entries = 10
+
+[sources.fastly]
+url = "https://api.fastly.com/public-ip-list"
+format = "json"
+paths = ["addresses[]", "ipv6_addresses[]"]
+min_entries = 5
+
+[sources.microsoft365]
+url = "https://endpoints.office.com/endpoints/worldwide?clientrequestid=b10c5ed1-bad1-445f-b386-b919946339a7"
+format = "json"
+paths = ["[].ips[]"]
+min_entries = 20
+refresh_minutes = 1440        # Microsoft asks for at most hourly; daily is plenty
+
+[sources.uptimerobot]
+url = "https://uptimerobot.com/inc/files/ips/IPv4andIPv6.txt"
+min_entries = 20
+
+
+# ======================================================================== feeds: block
 
 [feeds.inbound-block-v4]
-description = "Spamhaus DROP + DShield, IPv4, minus allowlist"
+description = "Spamhaus DROP + DShield, IPv4"
 sources = ["spamhaus_drop_v4", "dshield"]
 exclude = ["allowlist"]
 family = "ipv4"
@@ -74,7 +208,7 @@ min_confidence = 76
 aliases = ["inboundfeedhc"]   # MineMeld high-confidence inbound feed name
 
 [feeds.inbound-block-v6]
-description = "Spamhaus DROP, IPv6, minus allowlist"
+description = "Spamhaus DROP, IPv6"
 sources = ["spamhaus_drop_v6"]
 exclude = ["allowlist"]
 family = "ipv6"
@@ -96,24 +230,126 @@ family = "ipv4"
 max_confidence = 49
 aliases = ["inboundfeedlc"]
 
+[feeds.threat-extended]
+description = "Spamhaus + DShield + ET compromised + CINS + IPsum(3) + GreenSnow (+ AbuseIPDB if enabled), v4+v6"
+sources = ["spamhaus_drop_v4", "spamhaus_drop_v6", "dshield", "et_compromised", "cins_army", "ipsum_level3",
+           "greensnow", "abuseipdb_v4", "abuseipdb_v6"]
+exclude = ["allowlist"]
+max_entries = 50000
+
+[feeds.threat-ipv6]
+description = "IPv6 threat sources only: Spamhaus DROP v6 (+ AbuseIPDB v6 if enabled)"
+sources = ["spamhaus_drop_v6", "abuseipdb_v6"]
+exclude = ["allowlist"]
+family = "ipv6"
+
+[feeds.attackers-blocklist-de]
+description = "blocklist.de attack reports (noisier; inbound to exposed services only)"
+sources = ["blocklist_de"]
+exclude = ["allowlist"]
+max_entries = 50000
+
+[feeds.c2-botnet]
+description = "abuse.ch Feodo Tracker botnet C2 - block outbound"
+sources = ["feodo_c2"]
+exclude = ["allowlist"]
+
+[feeds.tor-exits]
+description = "Tor exit relays, IPv4 + IPv6"
+sources = ["tor_relays"]
+exclude = ["allowlist"]
+
+[feeds.tor-exits-v6]
+description = "Tor exit relays, IPv6"
+sources = ["tor_relays"]
+exclude = ["allowlist"]
+family = "ipv6"
+
+
+# ======================================================================== feeds: bogons
+
+[feeds.bogons-v4]
+description = "Team Cymru full bogons, IPv4"
+kind = "bogon"
+sources = ["teamcymru_fullbogons_v4"]
+exclude = ["bogon_exceptions"]
+family = "ipv4"
+
+[feeds.bogons-v6-compact]
+description = "IPv6 bogons, compact (outside 2000::/3 + documentation/benchmark space)"
+kind = "bogon"
+sources = ["ipv6_martians"]
+exclude = ["bogon_exceptions"]
+family = "ipv6"
+
+[feeds.bogons-v6]
+description = "Team Cymru full bogons, IPv6 (~150k entries - check your firewall's limit)"
+kind = "bogon"
+sources = ["teamcymru_fullbogons_v6"]
+exclude = ["bogon_exceptions"]
+family = "ipv6"
+
+
+# ======================================================================== feeds: allow / service ranges
+
 [feeds.aws-s3-v4]
-description = "AWS S3 address ranges, IPv4"
+description = "AWS S3, IPv4"
+kind = "allow"
 sources = ["aws_s3"]
 family = "ipv4"
 aliases = ["node-1612106016582"]   # MineMeld AWS S3 output node (was IPv4 only)
 
 [feeds.aws-s3]
-description = "AWS S3 address ranges, IPv4 + IPv6"
+description = "AWS S3, IPv4 + IPv6"
+kind = "allow"
 sources = ["aws_s3"]
 
-[feeds.bogons-v4]
-description = "Team Cymru full bogons, IPv4 - source match on internet-facing zones only"
-sources = ["teamcymru_fullbogons_v4"]
-exclude = ["bogon_exceptions"]
-family = "ipv4"
+[feeds.aws-cloudfront]
+description = "AWS CloudFront, IPv4 + IPv6"
+kind = "allow"
+sources = ["aws_cloudfront"]
 
-[feeds.bogons-v6]
-description = "Team Cymru full bogons, IPv6 - source match on internet-facing zones only"
-sources = ["teamcymru_fullbogons_v6"]
-exclude = ["bogon_exceptions"]
-family = "ipv6"
+[feeds.aws-route53-healthchecks]
+description = "AWS Route 53 health checkers, IPv4 + IPv6"
+kind = "allow"
+sources = ["aws_route53_healthchecks"]
+
+[feeds.cloudflare]
+description = "Cloudflare, IPv4 + IPv6"
+kind = "allow"
+sources = ["cloudflare_v4", "cloudflare_v6"]
+
+[feeds.google]
+description = "Google services, IPv4 + IPv6"
+kind = "allow"
+sources = ["google"]
+
+[feeds.google-cloud]
+description = "Google Cloud customer ranges, IPv4 + IPv6"
+kind = "allow"
+sources = ["google_cloud"]
+
+[feeds.github-hooks]
+description = "GitHub webhook senders, IPv4 + IPv6"
+kind = "allow"
+sources = ["github_hooks"]
+
+[feeds.github]
+description = "GitHub web, API and git, IPv4 + IPv6"
+kind = "allow"
+sources = ["github_core"]
+
+[feeds.fastly]
+description = "Fastly CDN, IPv4 + IPv6"
+kind = "allow"
+sources = ["fastly"]
+
+[feeds.microsoft365]
+description = "Microsoft 365 endpoints, IPv4 + IPv6"
+kind = "allow"
+sources = ["microsoft365"]
+
+[feeds.uptimerobot]
+description = "UptimeRobot monitoring, IPv4 + IPv6"
+kind = "allow"
+sources = ["uptimerobot"]
