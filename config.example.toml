@@ -1,8 +1,11 @@
-# edl-aggregator configuration
+# edl-aggregator configuration. Changes are picked up automatically within a minute; an invalid file is
+# rejected (logged + alerted) and the running config stays. Validate with: edl_aggregator.py --check
 #
 # [sources.<name>]  where indicators come from
+#   type                ip (default) | domain | url
 #   url / entries       download URL, or an inline list (`entries = [...]`)
-#   format              plain | spamhaus-json | dshield | aws-json | json
+#   format              plain | hosts | spamhaus-json | dshield | aws-json | json
+#   strip_scheme, max_length   url only: drop http(s):// (Palo Alto format, default true); skip longer (255)
 #   paths, where        json only: paths like "prefixes[].ipv6Prefix", "[].ips[]"; where = {key = value(s)}
 #   service, region     aws-json only: filter ip-ranges.json (string or list)
 #   enabled             false = never fetched, contributes nothing (default true)
@@ -19,17 +22,38 @@
 #   min/max_confidence  only include sources in this range
 #   max_entries         size limit (0 = none). Over it: overflow = "keep-last" (serve previous build) or "serve"
 #   aliases             extra names with the same content (e.g. old MineMeld feed names)
+#   basic_auth, allow_clients   per-feed access control (default: [server] values)
+#   A feed's type (ip/domain/url) comes from its sources; all sources in a feed must have the same type.
+#   URL feeds may exclude domain sources (by host).
+#
+# [dynamic.<name>]  a list you change at runtime through the API (type = ip | domain | url); use it as a source.
 
 refresh_minutes = 60          # default per-source interval. Spamhaus asks for no more than one download per hour.
 
+[server]
+# Applies to every feed unless the feed sets its own, and to /status, /metrics, /lookup and the API.
+# allow_clients = ["10.2.0.0/16"]
+# basic_auth = { username = "edl", password = "${EDL_FEED_PASSWORD}" }
+
+[api]
+# Bearer token for /api/dynamic. Empty = API disabled.
+token = "${EDL_API_TOKEN}"
+
 [safety]
 max_shrink_percent = 50
-# Never published in a block feed, whatever an upstream says. Add your own public IPs / prefixes here.
+# Never published in a block feed, whatever an upstream (or an API call) says. Add your public IPs / prefixes.
 never_block = [
   "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",   # RFC 1918
   "100.64.0.0/10",                                   # CGNAT / Tailscale
   "127.0.0.0/8", "169.254.0.0/16",
   "::1/128", "fc00::/7", "fe80::/10",
+]
+# Never published in a domain block feed (domain + subdomains). In URL block feeds only bare-host entries are
+# removed, so a specific malicious URL on a shared host (s3.amazonaws.com/x, raw.githubusercontent.com/y) stays.
+# Add your own domains.
+never_block_domains = [
+  "google.com", "microsoft.com", "apple.com", "github.com", "githubusercontent.com", "cloudflare.com",
+  "amazonaws.com", "windowsupdate.com", "office.com", "live.com",
 ]
 
 [alerts]
@@ -353,3 +377,117 @@ sources = ["microsoft365"]
 description = "UptimeRobot monitoring, IPv4 + IPv6"
 kind = "allow"
 sources = ["uptimerobot"]
+
+
+# ======================================================================== domain and URL sources (block)
+
+[sources.urlhaus_urls]
+type = "url"
+url = "https://urlhaus.abuse.ch/downloads/text_online/"   # live malware distribution URLs
+min_entries = 500
+refresh_minutes = 30
+
+[sources.urlhaus_domains]
+type = "domain"
+format = "hosts"
+url = "https://urlhaus.abuse.ch/downloads/hostfile/"       # domains serving malware
+min_entries = 50
+refresh_minutes = 30
+
+[sources.threatfox_domains]
+type = "domain"
+format = "hosts"
+url = "https://threatfox.abuse.ch/downloads/hostfile/"     # malware C2 / IOC domains
+min_entries = 1000
+refresh_minutes = 60
+
+[sources.openphish_urls]
+type = "url"
+url = "https://raw.githubusercontent.com/openphish/public_feed/refs/heads/main/feed.txt"   # phishing URLs
+min_entries = 50
+refresh_minutes = 60
+
+[sources.phishing_army]
+type = "domain"
+url = "https://phishing.army/download/phishing_army_blocklist.txt"   # ~140k phishing domains - large
+min_entries = 10000
+refresh_minutes = 360
+
+[sources.hagezi_tif_mini]
+type = "domain"
+url = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif.mini-onlydomains.txt"   # ~190k
+min_entries = 1000
+refresh_minutes = 360
+
+[sources.domain_allowlist]
+type = "domain"
+entries = []                  # your exceptions for domain/URL block feeds (domain + subdomains)
+
+[sources.crowdsec_blocklist]
+# CrowdSec "blocklist integration" (free account): IPv4 + IPv6. Set the integration URL and credentials.
+enabled = false
+url = "${CROWDSEC_BLOCKLIST_URL}"
+headers = { Authorization = "Basic ${CROWDSEC_BASIC_AUTH}" }   # base64("user:password") from the console
+min_entries = 100
+
+
+# ======================================================================== service domains (allow)
+
+[sources.microsoft365_domains]
+type = "domain"
+url = "https://endpoints.office.com/endpoints/worldwide?clientrequestid=b10c5ed1-bad1-445f-b386-b919946339a7"
+format = "json"
+paths = ["[].urls[]"]
+min_entries = 50
+refresh_minutes = 1440
+
+
+# ======================================================================== dynamic lists (API)
+# Add/remove entries at runtime: POST/DELETE /api/dynamic/<name> with a bearer token (see [api]).
+
+[dynamic.manual_block_ip]
+type = "ip"
+
+[dynamic.manual_block_domain]
+type = "domain"
+
+
+# ======================================================================== feeds: domain / URL
+
+[feeds.malware-urls]
+description = "URLhaus online malware URLs (Palo Alto URL EDL format, no scheme)"
+sources = ["urlhaus_urls"]
+exclude = ["domain_allowlist"]
+max_entries = 100000
+
+[feeds.phishing-urls]
+description = "OpenPhish phishing URLs"
+sources = ["openphish_urls"]
+exclude = ["domain_allowlist"]
+
+[feeds.malware-domains]
+description = "URLhaus + ThreatFox malware/C2 domains (+ manual blocks)"
+sources = ["urlhaus_domains", "threatfox_domains", "manual_block_domain"]
+exclude = ["domain_allowlist"]
+max_entries = 100000
+
+[feeds.threat-intel-domains]
+description = "Hagezi Threat Intelligence Feeds (mini) - ~190k domains, check your firewall's limit"
+sources = ["hagezi_tif_mini"]
+exclude = ["domain_allowlist"]
+max_entries = 250000
+
+[feeds.phishing-domains]
+description = "Phishing Army (~140k domains - check your firewall's domain EDL limit)"
+sources = ["phishing_army"]
+exclude = ["domain_allowlist"]
+max_entries = 250000
+
+[feeds.manual-block-ip]
+description = "Manual IP blocks via the API (time-limited or permanent)"
+sources = ["manual_block_ip"]
+
+[feeds.microsoft365-domains]
+description = "Microsoft 365 domains (e.g. SSL decryption / proxy bypass)"
+kind = "allow"
+sources = ["microsoft365_domains"]

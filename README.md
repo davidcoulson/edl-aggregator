@@ -1,17 +1,24 @@
 # edl-aggregator
 
-Merge public IP threat feeds and service ranges and serve them as **External Dynamic Lists** (EDLs) for your
-firewall. A lightweight replacement for the most common use of Palo Alto **MineMeld** (discontinued), in one
-Python file with no dependencies beyond the standard library.
+Merge public threat feeds (IP addresses, domains and URLs) and service ranges and serve them as **External
+Dynamic Lists** (EDLs) for your firewall. A lightweight replacement for the most common use of Palo Alto
+**MineMeld** (discontinued), in one Python file with no dependencies beyond the standard library.
 
-Works with Palo Alto EDLs, pfSense/OPNsense URL table aliases, FortiGate external threat feeds, or anything
-that can poll a URL for a list of networks.
+Works with Palo Alto IP / domain / URL EDLs, pfSense/OPNsense URL table aliases, FortiGate external threat feeds,
+or anything that can poll a URL for a list.
 
 ## Features
 
-- **Sources**: Spamhaus DROP (v4/v6), DShield, Emerging Threats, CINS Army, IPsum, GreenSnow, blocklist.de,
-  abuse.ch Feodo, Tor exits (v4/v6), AbuseIPDB (API key), Team Cymru bogons, AWS / Cloudflare / Google /
+- **IP sources**: Spamhaus DROP (v4/v6), DShield, Emerging Threats, CINS Army, IPsum, GreenSnow, blocklist.de,
+  abuse.ch Feodo, Tor exits (v4/v6), AbuseIPDB and CrowdSec (keys), Team Cymru bogons, AWS / Cloudflare / Google /
   Google Cloud / GitHub / Fastly / Microsoft 365 / UptimeRobot ranges - or any plain-text or JSON list.
+- **Domain and URL sources**: abuse.ch URLhaus (URLs + domains) and ThreatFox, OpenPhish, Phishing Army, Hagezi
+  Threat Intelligence, Microsoft 365 domains - plain, hosts-file or JSON. URLs are published in Palo Alto URL-EDL
+  form (no scheme).
+- **Dynamic lists**: add or remove entries at runtime through an authenticated API, with optional expiry - for
+  scripts, Home Assistant, fail2ban/CrowdSec bouncers, or a quick manual block.
+- **Access control**: HTTP Basic auth and client allow-lists, globally or per feed.
+- **Live config reload**: edits apply within a minute; an invalid file is rejected and the running config stays.
 - **IPv6 throughout**: every source that publishes IPv6 is used, plus a compact IPv6 bogon list (7 entries).
 - **Feeds**: merge sources, subtract allow-lists, filter by family and confidence, collapse to the fewest CIDRs.
   Three kinds: `block`, `allow` (service ranges) and `bogon`.
@@ -41,11 +48,12 @@ Pass API keys as environment variables (e.g. `-e ABUSEIPDB_API_KEY=...`) and ref
 
 | Path | What |
 |---|---|
-| `/` | index of feeds by kind, with entry counts |
+| `/` | index of feeds by kind and type, with entry counts |
 | `/feeds/<name>` | the list, one CIDR per line (`.txt` suffix optional); ETag/Last-Modified, 304 support |
 | `/status`, `/healthz` | JSON status of every source and feed; HTTP 503 if a required source has no data |
 | `/metrics` | Prometheus metrics: entries per feed/source, source up/failures/last success, overflow |
-| `/lookup?ip=<addr>` | which feeds and sources contain an address, and whether it is in `never_block` |
+| `/lookup?ip=` / `?domain=` / `?url=` | which feeds and sources contain it, and whether it is protected by `never_block` |
+| `/api/dynamic/<list>` | dynamic list API (bearer token; see below) |
 
 | Environment | Default | |
 |---|---|---|
@@ -90,9 +98,73 @@ kind = "allow"
 sources = ["github_hooks"]
 ```
 
-Source formats: `plain`, `spamhaus-json`, `dshield`, `aws-json` (`service`, `region`), and `json` with `paths`
+Source formats: `plain`, `hosts` (hosts-file), `spamhaus-json`, `dshield`, `aws-json` (`service`, `region`), and `json` with `paths`
 (`"prefixes[].ipv6Prefix"`, `"[].ips[]"`; `[]` iterates a list) and an optional `where` filter. Entries may be IPs,
 CIDRs, `a-b` ranges, `[v6]:port` or `v4:port`.
+
+## Domain and URL feeds
+
+Set `type = "domain"` or `type = "url"` on a source; a feed's type follows its sources (all must match).
+Domains are lower-cased with trailing dots and any scheme/path removed (`*.` wildcards are kept). URLs lose their
+scheme and fragment (Palo Alto URL-EDL format; set `strip_scheme = false` to keep it) and entries over 255
+characters are skipped.
+
+`[safety] never_block_domains` protects your domains: they and their subdomains never appear in a domain block
+feed. In URL feeds only bare-host entries (`example.com/`) are removed, so a specific malicious URL on a shared host
+(`s3.amazonaws.com/...`, `raw.githubusercontent.com/...`) is still blocked. A feed's own `exclude` domain source
+removes every URL on those hosts.
+
+`/lookup?domain=a.b.example` matches parent-domain entries; `/lookup?url=...` checks URL feeds and the URL's host
+against domain feeds.
+
+## Dynamic lists (API)
+
+```toml
+[api]
+token = "${EDL_API_TOKEN}"
+
+[dynamic.manual_block_ip]
+type = "ip"
+
+[feeds.manual-block-ip]
+sources = ["manual_block_ip"]
+```
+
+```bash
+TOKEN=...   # value of EDL_API_TOKEN
+# block for 2 hours
+curl -X POST http://edl/api/dynamic/manual_block_ip -H "Authorization: Bearer $TOKEN" \
+  -d '{"entries": ["198.51.100.7", "2001:db8::bad"], "ttl_minutes": 120, "comment": "ssh brute force"}'
+# list / remove
+curl -H "Authorization: Bearer $TOKEN" http://edl/api/dynamic/manual_block_ip
+curl -X DELETE -H "Authorization: Bearer $TOKEN" "http://edl/api/dynamic/manual_block_ip?entry=198.51.100.7"
+```
+
+Entries are validated for the list's type, persisted in `/data/dynamic/`, expire automatically, and the feeds are
+rebuilt immediately. `never_block` still applies, so an API call can't block your own networks. Without a token the
+API is disabled.
+
+## Access control
+
+```toml
+[server]
+allow_clients = ["10.2.0.0/16"]                                  # all feeds, /status, /metrics, /lookup, API
+basic_auth = { username = "edl", password = "${EDL_FEED_PASSWORD}" }   # all feeds
+
+[feeds.private-list]
+sources = ["..."]
+allow_clients = ["10.2.1.1/32"]                                  # per-feed override
+```
+
+## Config reload and validation
+
+The config file is checked every minute; a changed file is loaded and validated first and only then replaces the
+running config (cached data and dynamic lists carry over). A broken edit is logged, alerted, and ignored. Validate
+before saving with:
+
+```bash
+docker exec edl-aggregator python /app/edl_aggregator.py --check
+```
 
 ## Bogon feeds
 
@@ -122,9 +194,16 @@ python -m unittest discover -s tests -v
 python edl_aggregator.py --config config.example.toml --data /tmp/edl --once --print threat-ipv6
 ```
 
-Images are built for `linux/amd64` and `linux/arm64` by GitHub Actions (with SBOM and provenance attestations) and
-published to `ghcr.io/davidcoulson/edl-aggregator` (`latest`, version tags, and `sha-<commit>`). A weekly rebuild
-picks up base-image security updates; Dependabot keeps actions and the base image current.
+Images are built for `linux/amd64` and `linux/arm64` by GitHub Actions (with SBOM and provenance attestations),
+signed with Sigstore cosign (keyless), and published to `ghcr.io/davidcoulson/edl-aggregator` (`latest`, version
+tags, and `sha-<commit>`). A weekly rebuild picks up base-image security updates; Dependabot keeps actions and the
+base image current. Verify a signature with:
+
+```bash
+cosign verify ghcr.io/davidcoulson/edl-aggregator:latest \
+  --certificate-identity-regexp 'https://github.com/davidcoulson/edl-aggregator/.github/workflows/docker.yml@.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
 
 ## License
 

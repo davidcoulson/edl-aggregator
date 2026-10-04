@@ -12,6 +12,7 @@ on:
 permissions:
   contents: read
   packages: write
+  id-token: write      # keyless cosign signing (Sigstore)
 
 env:
   IMAGE: ghcr.io/${{ github.repository }}
@@ -50,4 +51,12 @@ jobs:
           docker buildx build --platform linux/amd64,linux/arm64 --push "${TAGS[@]}" \
             --label "org.opencontainers.image.revision=$GITHUB_SHA" \
             --label "org.opencontainers.image.version=${GITHUB_REF_NAME}" \
-            --provenance=mode=max --sbom=true .
+            --provenance=mode=max --sbom=true --metadata-file /tmp/build-meta.json .
+      - name: Sign image (cosign keyless)
+        run: |
+          IMAGE=$(echo "$IMAGE" | tr '[:upper:]' '[:lower:]')
+          DIGEST=$(python3 -c 'import json; print(json.load(open("/tmp/build-meta.json"))["containerimage.digest"])')
+          curl -sSfL -o /tmp/cosign https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64
+          chmod +x /tmp/cosign
+          /tmp/cosign sign --yes "$IMAGE@$DIGEST"
+          echo "signed $IMAGE@$DIGEST"
