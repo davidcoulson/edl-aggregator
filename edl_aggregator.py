@@ -46,7 +46,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 log = logging.getLogger("edl-aggregator")
 USER_AGENT = f"edl-aggregator/{__version__} (+https://github.com/davidcoulson/edl-aggregator)"
@@ -327,6 +327,14 @@ def _walk(node, segments: list[str], where: dict):
         yield from _walk(node, rest, where)
 
 
+def json_values(text: str, paths, where=None) -> list[str]:
+    data = json.loads(text)
+    out = []
+    for path in paths:
+        out.extend(_walk(data, [s for s in path.split(".") if s], where or {}))
+    return out
+
+
 def parse_json(text: str, paths=None, where=None, **_) -> list[str]:
     """Generic JSON: `paths` like ["prefixes[].ipv4Prefix", "hooks[]", "[].ips[]"]; `[]` iterates a list.
     `where` (optional) skips any object whose listed keys don't match, e.g. {category = ["Optimize", "Allow"]}."""
@@ -421,7 +429,7 @@ PARSERS = {
 }
 SOURCE_KEYS = {"url", "entries", "format", "type", "confidence", "min_entries", "enabled", "refresh_minutes",
                "headers", "max_shrink_percent", "description", "timeout", "dynamic", "expand_asns",
-               "asn_database", "asn_database_refresh_minutes"}
+               "asn_database", "asn_database_refresh_minutes", "next_page", "max_pages"}
 
 
 # --------------------------------------------------------------------------- alerts
@@ -472,6 +480,8 @@ class Source:
         self.expand_asns = bool(cfg.get("expand_asns", self.format == "spamhaus-asn-json"))
         self.asn_db_url = expand_env(cfg.get("asn_database", ASN_DB_DEFAULT))
         self.asn_db_refresh = float(cfg.get("asn_database_refresh_minutes", 1440))
+        self.next_page = cfg.get("next_page")                  # json path to the next page's URL (paginated APIs)
+        self.max_pages = int(cfg.get("max_pages", 100))
         self.opts = {k: v for k, v in cfg.items() if k not in SOURCE_KEYS}
         self.cache = data_dir / "cache" / f"{name}.txt"
         self.meta_file = data_dir / "cache" / f"{name}.json"
@@ -525,6 +535,8 @@ class Source:
                 self.meta = {}
             self.status["fetched_at"] = self.meta.get("fetched_at")
             self.status["checked_at"] = self.meta.get("checked_at")
+            if self.items and self.meta.get("checked_at"):
+                self.status["ok"] = True
 
     def _load_static(self):
         self.items = collapse_items(self.type, to_items(self.type, [str(e) for e in self.entries_static], self.opts))
@@ -633,8 +645,21 @@ class Source:
         except Exception as e:
             self._fail(f"{type(e).__name__}: {e}")
             return False
+        pages = [text]
+        if self.next_page:                                     # follow "next" links (e.g. AlienVault OTX)
+            try:
+                nxt = next(iter(json_values(text, [self.next_page])), None)
+                while nxt and len(pages) < self.max_pages:
+                    req = urllib.request.Request(nxt, headers={"User-Agent": USER_AGENT, **self.headers})
+                    with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                        page = resp.read().decode("utf-8", "replace")
+                    pages.append(page)
+                    nxt = next(iter(json_values(page, [self.next_page])), None)
+            except Exception as e:
+                self._fail(f"page {len(pages) + 1}: {type(e).__name__}: {e}")
+                return False
         try:
-            tokens = PARSERS[self.format](text, item_type=self.type, **self.opts)
+            tokens = [t for page in pages for t in PARSERS[self.format](page, item_type=self.type, **self.opts)]
             raw_tokens = len(tokens)
             if self.expand_asns:
                 tokens = asn_ranges(tokens, self.asn_db_url, self.cache.parent, self.asn_db_refresh, self.timeout)

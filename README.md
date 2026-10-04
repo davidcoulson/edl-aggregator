@@ -10,10 +10,13 @@ or anything that can poll a URL for a list.
 ## Features
 
 - **IP sources**: Spamhaus DROP (v4/v6) and ASN-DROP (expanded to announced ranges), DShield, Emerging Threats,
-  CINS Army, IPsum, GreenSnow, blocklist.de, abuse.ch Feodo and ThreatFox C2, Tor exits (v4/v6), AbuseIPDB and
-  CrowdSec (accounts), Team Cymru bogons, AWS / Cloudflare / Google / Google Cloud / GitHub / Fastly /
-  Microsoft 365 / UptimeRobot ranges - or any plain-text, CSV or JSON list.
-- **Domain and URL sources**: abuse.ch URLhaus (URLs + domains) and ThreatFox (URLs + domains), OpenPhish, Phishing Army, Hagezi
+  CINS Army, IPsum (levels 3 and 5), GreenSnow, blocklist.de, ThreatView (IPs + Cobalt Strike C2), abuse.ch Feodo
+  and ThreatFox C2, SANS ISC research scanners, X4BNet datacenter (v4/v6) and VPN ranges, Tor exits (v4/v6),
+  AbuseIPDB / CrowdSec / AlienVault OTX (accounts), Team Cymru bogons - or any plain-text, CSV or (paginated) JSON list.
+- **Service ranges**: AWS (S3, CloudFront, Route 53 health checks), Cloudflare, Google, Google Cloud, GitHub,
+  Fastly, Microsoft 365, Zoom, Atlassian, Stripe webhooks, Oracle Cloud, DigitalOcean, UptimeRobot.
+- **Domain and URL sources**: abuse.ch URLhaus (URLs + domains) and ThreatFox (URLs + domains), ThreatView (URLs +
+  domains), OpenPhish, PhishTank and AlienVault OTX (accounts), Phishing Army, Hagezi
   Threat Intelligence, Microsoft 365 domains - plain, hosts-file or JSON. URLs are published in Palo Alto URL-EDL
   form (no scheme).
 - **Dynamic lists**: add or remove entries at runtime through an authenticated API, with optional expiry - for
@@ -101,7 +104,8 @@ sources = ["github_hooks"]
 
 Source formats: `plain`, `hosts` (hosts-file), `csv` (`column`, optional `min_column`/`min_value` threshold),
 `spamhaus-json`, `spamhaus-asn-json`, `dshield`, `aws-json` (`service`, `region`), and `json` with `paths`
-(`"prefixes[].ipv6Prefix"`, `"[].ips[]"`; `[]` iterates a list) and an optional `where` filter. Entries may be IPs,
+(`"prefixes[].ipv6Prefix"`, `"[].ips[]"`; `[]` iterates a list) and an optional `where` filter; paginated JSON APIs
+are followed with `next_page = "next"` (path of the next page's URL) and `max_pages`. Entries may be IPs,
 CIDRs, `a-b` ranges, `[v6]:port` or `v4:port`.
 
 ## ASN expansion
@@ -119,10 +123,15 @@ Everything in the example config works without an account except these, which sh
 |---|---|---|
 | AbuseIPDB (`abuseipdb_v4`, `abuseipdb_v6`) | free account at abuseipdb.com -> API key. Free tier: 5 blacklist downloads/day (the example refreshes every 6 h), 10,000 IPs per list | `ABUSEIPDB_API_KEY` env var; `enabled = true` |
 | CrowdSec (`crowdsec_blocklist`) | free CrowdSec Console account -> create a *Blocklist integration* (firewall integration) and subscribe it to blocklists | `CROWDSEC_BLOCKLIST_URL` and `CROWDSEC_BASIC_AUTH` (base64 of `user:password`); `enabled = true` |
+| AlienVault OTX (`otx_ipv4`, `otx_ipv6`, `otx_domains`, `otx_urls`) | free OTX account -> API key; subscribe to the pulses you want (the export returns indicators from subscribed pulses) | `OTX_API_KEY`; `enabled = true` on the otx sources |
+| PhishTank (`phishtank_urls`) | free PhishTank account -> application key (new registrations have been restricted at times) | `PHISHTANK_APP_KEY`; `enabled = true` |
+
+Not included: **GreyNoise** (the free Community API is per-IP lookups, not bulk lists) and **Shadowserver** (free
+and worth having, but it sends reports about *your own* networks rather than publishing a block list).
 
 No account needed: Spamhaus DROP / ASN-DROP (free under Spamhaus' DROP terms), abuse.ch URLhaus / ThreatFox /
-Feodo (bulk exports), DShield, Emerging Threats, CINS, IPsum, GreenSnow, blocklist.de, Tor, Team Cymru,
-OpenPhish (community feed), Phishing Army, Hagezi, iptoasn.com, and all cloud/service ranges.
+Feodo (bulk exports), DShield, Emerging Threats, CINS, IPsum, GreenSnow, blocklist.de, ThreatView, SANS ISC,
+X4BNet, Tor, Team Cymru, OpenPhish (community feed), Phishing Army, Hagezi, iptoasn.com, and all service ranges.
 
 ## Domain and URL feeds
 

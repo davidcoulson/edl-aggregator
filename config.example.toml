@@ -6,6 +6,7 @@
 #   url / entries       download URL, or an inline list (`entries = [...]`)
 #   format              plain | hosts | csv | spamhaus-json | spamhaus-asn-json | dshield | aws-json | json
 #   column, min_column, min_value   csv only: value column (0-based); keep rows where min_column >= min_value
+#   next_page, max_pages   paginated JSON APIs: json path of the next page's URL (e.g. "next"), page limit (100)
 #   expand_asns         ip only: entries are ASNs, expanded to announced ranges via asn_database (ip2asn TSV;
 #                       default iptoasn.com, refreshed daily - asn_database_refresh_minutes)
 #   strip_scheme, max_length   url only: drop http(s):// (Palo Alto format, default true); skip longer (255)
@@ -48,7 +49,7 @@ max_shrink_percent = 50
 never_block = [
   "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",   # RFC 1918
   "100.64.0.0/10",                                   # CGNAT / Tailscale
-  "127.0.0.0/8", "169.254.0.0/16",
+  "0.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16",       # "this network", loopback, link-local
   "::1/128", "fc00::/7", "fe80::/10",
 ]
 # Never published in a domain block feed (domain + subdomains). In URL block feeds only bare-host entries are
@@ -121,6 +122,67 @@ url = "https://www.spamhaus.org/drop/asndrop.json"
 format = "spamhaus-asn-json"
 refresh_minutes = 1440
 min_entries = 100
+
+[sources.threatview_ips]
+url = "https://threatview.io/Downloads/IP-High-Confidence-Feed.txt"        # high-confidence malicious IPs
+min_entries = 1000
+
+[sources.threatview_cobaltstrike]
+# Cobalt Strike C2 servers (CSV: ip, date, ...)
+url = "https://threatview.io/Downloads/High-Confidence-CobaltStrike-C2%20-Feeds.txt"
+format = "csv"
+column = 0
+min_entries = 100
+
+[sources.ipsum_level5]
+url = "https://raw.githubusercontent.com/stamparm/ipsum/master/levels/5.txt"   # on 5+ blacklists: very low FP
+min_entries = 500
+
+[sources.isc_research_scanners]
+# SANS ISC: Shodan, Censys, and other internet-wide research scanners
+url = "https://isc.sans.edu/api/threatcategory/research?json"
+format = "json"
+paths = ["[].ipv4"]
+min_entries = 1000
+refresh_minutes = 360
+
+[sources.x4b_datacenter_v4]
+url = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/datacenter/ipv4.txt"   # hosting/datacenter ranges
+min_entries = 10000
+refresh_minutes = 1440
+
+[sources.x4b_datacenter_v6]
+url = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/datacenter/ipv6.txt"
+min_entries = 1000
+refresh_minutes = 1440
+
+[sources.x4b_vpn_v4]
+url = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/vpn/ipv4.txt"          # commercial VPN exits
+min_entries = 1000
+refresh_minutes = 1440
+
+[sources.otx_ipv4]
+# AlienVault OTX: indicators from the pulses you subscribe to. Needs OTX_API_KEY (free account).
+enabled = false
+url = "https://otx.alienvault.com/api/v1/indicators/export?type=IPv4&limit=5000"
+headers = { X-OTX-API-KEY = "${OTX_API_KEY}" }
+format = "json"
+paths = ["results[].indicator"]
+next_page = "next"
+max_pages = 50
+refresh_minutes = 360
+min_entries = 100
+
+[sources.otx_ipv6]
+enabled = false
+url = "https://otx.alienvault.com/api/v1/indicators/export?type=IPv6&limit=5000"
+headers = { X-OTX-API-KEY = "${OTX_API_KEY}" }
+format = "json"
+paths = ["results[].indicator"]
+next_page = "next"
+max_pages = 50
+refresh_minutes = 360
+min_entries = 0
 
 [sources.tor_relays]
 # Exit relays with their IPv4 and IPv6 addresses (Onionoo). Ports are stripped.
@@ -235,6 +297,34 @@ paths = ["[].ips[]"]
 min_entries = 20
 refresh_minutes = 1440        # Microsoft asks for at most hourly; daily is plenty
 
+[sources.zoom]
+url = "https://assets.zoom.us/docs/ipranges/Zoom.txt"
+min_entries = 10
+
+[sources.atlassian]
+url = "https://ip-ranges.atlassian.com/"
+format = "json"
+paths = ["items[].cidr"]
+min_entries = 50
+
+[sources.stripe_webhooks]
+url = "https://stripe.com/files/ips/ips_webhooks.txt"
+min_entries = 5
+
+[sources.oracle_cloud]
+url = "https://docs.oracle.com/en-us/iaas/tools/public_ip_ranges.json"
+format = "json"
+paths = ["regions[].cidrs[].cidr"]
+min_entries = 100
+refresh_minutes = 1440
+
+[sources.digitalocean]
+url = "https://digitalocean.com/geo/google.csv"
+format = "csv"
+column = 0
+min_entries = 100
+refresh_minutes = 1440
+
 [sources.uptimerobot]
 url = "https://uptimerobot.com/inc/files/ips/IPv4andIPv6.txt"
 min_entries = 20
@@ -274,15 +364,15 @@ max_confidence = 49
 aliases = ["inboundfeedlc"]
 
 [feeds.threat-extended]
-description = "Spamhaus + DShield + ET compromised + CINS + IPsum(3) + GreenSnow (+ AbuseIPDB if enabled), v4+v6"
+description = "Spamhaus + DShield + ET + CINS + IPsum(3) + GreenSnow + ThreatView (+ AbuseIPDB, CrowdSec if enabled)"
 sources = ["spamhaus_drop_v4", "spamhaus_drop_v6", "dshield", "et_compromised", "cins_army", "ipsum_level3",
-           "greensnow", "abuseipdb_v4", "abuseipdb_v6", "crowdsec_blocklist"]
+           "greensnow", "threatview_ips", "abuseipdb_v4", "abuseipdb_v6", "crowdsec_blocklist"]
 exclude = ["allowlist"]
 max_entries = 50000
 
 [feeds.threat-ipv6]
-description = "IPv6 threat sources: Spamhaus DROP v6 (+ AbuseIPDB v6, CrowdSec if enabled)"
-sources = ["spamhaus_drop_v6", "abuseipdb_v6", "crowdsec_blocklist"]
+description = "IPv6 threat sources: Spamhaus DROP v6 (+ AbuseIPDB v6, CrowdSec, OTX if enabled)"
+sources = ["spamhaus_drop_v6", "abuseipdb_v6", "crowdsec_blocklist", "otx_ipv6"]
 exclude = ["allowlist"]
 family = "ipv6"
 
@@ -293,9 +383,36 @@ exclude = ["allowlist"]
 max_entries = 50000
 
 [feeds.c2-botnet]
-description = "abuse.ch Feodo Tracker + ThreatFox (confidence >= 75) botnet C2 IPs - block outbound"
-sources = ["feodo_c2", "threatfox_c2_ips"]
+description = "Feodo + ThreatFox (confidence >= 75) + ThreatView Cobalt Strike C2 IPs - block outbound"
+sources = ["feodo_c2", "threatfox_c2_ips", "threatview_cobaltstrike"]
 exclude = ["allowlist"]
+
+[feeds.threat-strict]
+description = "IPsum level 5 (on 5+ blacklists) - very low false positives"
+sources = ["ipsum_level5"]
+exclude = ["allowlist"]
+
+[feeds.research-scanners]
+description = "Shodan / Censys / research scanners (SANS ISC) - drop inbound to exposed services"
+sources = ["isc_research_scanners"]
+exclude = ["allowlist"]
+
+[feeds.datacenter-ranges]
+description = "Hosting / datacenter ranges, IPv4 + IPv6 (X4BNet) - e.g. deny inbound to home services"
+sources = ["x4b_datacenter_v4", "x4b_datacenter_v6"]
+exclude = ["allowlist"]
+max_entries = 100000
+
+[feeds.vpn-ranges]
+description = "Commercial VPN exit ranges (X4BNet)"
+sources = ["x4b_vpn_v4"]
+exclude = ["allowlist"]
+
+[feeds.otx-ips]
+description = "AlienVault OTX subscribed-pulse IPs, v4 + v6 (enable otx_* sources)"
+sources = ["otx_ipv4", "otx_ipv6"]
+exclude = ["allowlist"]
+max_entries = 100000
 
 [feeds.asn-drop]
 description = "Spamhaus ASN-DROP: all ranges announced by listed networks, IPv4 + IPv6"
@@ -398,6 +515,31 @@ description = "Microsoft 365 endpoints, IPv4 + IPv6"
 kind = "allow"
 sources = ["microsoft365"]
 
+[feeds.zoom]
+description = "Zoom, IPv4"
+kind = "allow"
+sources = ["zoom"]
+
+[feeds.atlassian]
+description = "Atlassian cloud, IPv4 + IPv6"
+kind = "allow"
+sources = ["atlassian"]
+
+[feeds.stripe-webhooks]
+description = "Stripe webhook senders"
+kind = "allow"
+sources = ["stripe_webhooks"]
+
+[feeds.oracle-cloud]
+description = "Oracle Cloud (OCI) public ranges"
+kind = "allow"
+sources = ["oracle_cloud"]
+
+[feeds.digitalocean]
+description = "DigitalOcean ranges, IPv4 + IPv6"
+kind = "allow"
+sources = ["digitalocean"]
+
 [feeds.uptimerobot]
 description = "UptimeRobot monitoring, IPv4 + IPv6"
 kind = "allow"
@@ -451,6 +593,52 @@ format = "csv"
 column = 2
 min_entries = 10
 
+[sources.threatview_urls]
+type = "url"
+url = "https://threatview.io/Downloads/URL-High-Confidence-Feed.txt"   # non-http(s) entries (ftp://) are skipped
+min_entries = 500
+
+[sources.threatview_domains]
+type = "domain"
+url = "https://threatview.io/Downloads/DOMAIN-High-Confidence-Feed.txt"   # ~540k domains - large
+min_entries = 50000
+refresh_minutes = 360
+
+[sources.phishtank_urls]
+# PhishTank verified online phishing URLs. Needs a PhishTank application key (free account; new
+# registrations have been restricted at times).
+enabled = false
+type = "url"
+url = "http://data.phishtank.com/data/${PHISHTANK_APP_KEY}/online-valid.csv"
+format = "csv"
+column = 1
+refresh_minutes = 120
+min_entries = 1000
+
+[sources.otx_domains]
+enabled = false
+type = "domain"
+url = "https://otx.alienvault.com/api/v1/indicators/export?type=domain&limit=5000"
+headers = { X-OTX-API-KEY = "${OTX_API_KEY}" }
+format = "json"
+paths = ["results[].indicator"]
+next_page = "next"
+max_pages = 50
+refresh_minutes = 360
+min_entries = 100
+
+[sources.otx_urls]
+enabled = false
+type = "url"
+url = "https://otx.alienvault.com/api/v1/indicators/export?type=URL&limit=5000"
+headers = { X-OTX-API-KEY = "${OTX_API_KEY}" }
+format = "json"
+paths = ["results[].indicator"]
+next_page = "next"
+max_pages = 50
+refresh_minutes = 360
+min_entries = 100
+
 [sources.domain_allowlist]
 type = "domain"
 entries = []                  # your exceptions for domain/URL block feeds (domain + subdomains)
@@ -487,14 +675,14 @@ type = "domain"
 # ======================================================================== feeds: domain / URL
 
 [feeds.malware-urls]
-description = "URLhaus online + ThreatFox malware URLs (Palo Alto URL EDL format, no scheme)"
-sources = ["urlhaus_urls", "threatfox_urls"]
+description = "URLhaus online + ThreatFox + ThreatView malware URLs (Palo Alto URL EDL format, no scheme)"
+sources = ["urlhaus_urls", "threatfox_urls", "threatview_urls"]
 exclude = ["domain_allowlist"]
 max_entries = 100000
 
 [feeds.phishing-urls]
-description = "OpenPhish phishing URLs"
-sources = ["openphish_urls"]
+description = "OpenPhish (+ PhishTank if enabled) phishing URLs"
+sources = ["openphish_urls", "phishtank_urls"]
 exclude = ["domain_allowlist"]
 
 [feeds.malware-domains]
@@ -506,6 +694,24 @@ max_entries = 100000
 [feeds.threat-intel-domains]
 description = "Hagezi Threat Intelligence Feeds (mini) - ~190k domains, check your firewall's limit"
 sources = ["hagezi_tif_mini"]
+exclude = ["domain_allowlist"]
+max_entries = 250000
+
+[feeds.threatview-domains]
+description = "ThreatView high-confidence malicious domains (~540k - check your firewall's limit)"
+sources = ["threatview_domains"]
+exclude = ["domain_allowlist"]
+max_entries = 750000
+
+[feeds.otx-domains]
+description = "AlienVault OTX subscribed-pulse domains (enable otx_domains)"
+sources = ["otx_domains"]
+exclude = ["domain_allowlist"]
+max_entries = 250000
+
+[feeds.otx-urls]
+description = "AlienVault OTX subscribed-pulse URLs (enable otx_urls)"
+sources = ["otx_urls"]
 exclude = ["domain_allowlist"]
 max_entries = 250000
 

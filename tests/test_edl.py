@@ -196,6 +196,59 @@ class CsvAndAsnTests(unittest.TestCase):
             db_up.close()
 
 
+class PaginationAndStatusTests(unittest.TestCase):
+    def test_follows_next_page_links(self):
+        pages = {}
+
+        class H(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = pages.get(self.path.split("?")[0], "").encode()
+                self.send_response(200 if body else 404)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{srv.server_port}"
+        pages["/p1"] = json.dumps({"results": [{"indicator": "198.51.100.1"}], "next": base + "/p2"})
+        pages["/p2"] = json.dumps({"results": [{"indicator": "2001:db8::2"}], "next": base + "/p3"})
+        pages["/p3"] = json.dumps({"results": [{"indicator": "203.0.113.3"}], "next": None})
+        try:
+            cfg = {"sources": {"o": {"url": base + "/p1", "format": "json", "paths": ["results[].indicator"],
+                                     "next_page": "next", "min_entries": 3}},
+                   "feeds": {"f": {"sources": ["o"]}}}
+            with tempfile.TemporaryDirectory() as d:
+                agg = make(cfg, d)
+                agg.tick(force=True)
+                self.assertTrue(agg.sources["o"].status["ok"], agg.sources["o"].status["error"])
+                self.assertEqual(agg.get("f").text, "198.51.100.1/32\n203.0.113.3/32\n2001:db8::2/128\n")
+                pages["/p2"] = ""                       # a missing middle page fails the refresh, cache kept
+                agg.tick(force=True)
+                self.assertFalse(agg.sources["o"].status["ok"])
+                self.assertIn("page 2", agg.sources["o"].status["error"])
+                self.assertEqual(agg.get("f").count, 3)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_cached_source_reports_ok_at_startup(self):
+        up = Upstream()
+        try:
+            up.body = "192.0.2.1\n"
+            cfg = {"sources": {"s": {"url": up.url}}, "feeds": {"f": {"sources": ["s"]}}}
+            with tempfile.TemporaryDirectory() as d:
+                make(cfg, d).tick(force=True)
+                fresh = make(cfg, d)                      # restart: served from cache, not yet re-checked
+                self.assertTrue(fresh.sources["s"].status["ok"])
+                self.assertEqual(fresh.get("f").text, "192.0.2.1/32\n")
+        finally:
+            up.close()
+
+
 class SetTests(unittest.TestCase):
     def test_subtract(self):
         self.assertEqual(e.collapse(e.subtract([N("10.0.0.0/24")], [N("10.0.0.128/25")])), [N("10.0.0.0/25")])
