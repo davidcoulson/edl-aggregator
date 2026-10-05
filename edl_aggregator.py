@@ -47,7 +47,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-__version__ = "1.5.1"
+__version__ = "1.5.2"
 
 log = logging.getLogger("edl-aggregator")
 USER_AGENT = f"edl-aggregator/{__version__} (+https://github.com/davidcoulson/edl-aggregator)"
@@ -508,6 +508,7 @@ class Source:
         self.next_page = cfg.get("next_page")                  # json path to the next page's URL (paginated APIs)
         self.max_pages = int(cfg.get("max_pages", 100))
         self.retries = int(cfg.get("retries", 2))
+        self.backoff_until = 0.0                               # set by HTTP 429 / Retry-After
         self.opts = {k: v for k, v in cfg.items() if k not in SOURCE_KEYS}
         self.cache = data_dir / "cache" / f"{name}.txt"
         self.meta_file = data_dir / "cache" / f"{name}.json"
@@ -639,6 +640,8 @@ class Source:
     def due(self, now: float) -> bool:
         if not self.enabled or not self.url:
             return False
+        if now < self.backoff_until:           # rate-limited by the upstream: wait as long as it asked
+            return False
         if self.failures:   # retry failed sources sooner: 5 minutes, but never more often than the interval
             return now - self.last_attempt >= min(300, self.refresh_minutes * 60)
         return now - self.meta.get("checked_ts", 0) >= self.refresh_minutes * 60
@@ -663,6 +666,12 @@ class Source:
             if e.code == 304:
                 self._mark_checked()
                 log.info("source %s: not modified", self.name)
+                return False
+            if e.code in (429, 503):
+                retry_after = e.headers.get("Retry-After", "") if e.headers else ""
+                wait = int(retry_after) if retry_after.isdigit() else self.refresh_minutes * 60
+                self.backoff_until = time.time() + max(wait, 300)
+                self._fail(f"HTTP {e.code} {e.reason} - backing off {max(wait, 300) // 60:.0f} min")
                 return False
             self._fail(f"HTTP {e.code} {e.reason}")
             return False

@@ -316,6 +316,24 @@ class FetchRobustnessTests(unittest.TestCase):
             srv.server_close()
 
 
+class RateLimitTests(unittest.TestCase):
+    def test_429_backs_off_for_retry_after(self):
+        up = Upstream()
+        try:
+            up.status = 429
+            cfg = {"sources": {"s": {"url": up.url, "refresh_minutes": 60}}, "feeds": {"f": {"sources": ["s"]}}}
+            with tempfile.TemporaryDirectory() as d:
+                agg = make(cfg, d)
+                agg.tick(force=True)
+                src = agg.sources["s"]
+                self.assertIn("429", src.status["error"])
+                self.assertFalse(src.due(time.time() + 600))          # normal failure retry is 5 min
+                self.assertTrue(src.due(time.time() + 3601))          # backs off a full interval
+                self.assertEqual(up.hits, 1)                          # no retries on 429
+        finally:
+            up.close()
+
+
 class SetTests(unittest.TestCase):
     def test_subtract(self):
         self.assertEqual(e.collapse(e.subtract([N("10.0.0.0/24")], [N("10.0.0.128/25")])), [N("10.0.0.0/25")])

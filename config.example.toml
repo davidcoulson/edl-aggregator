@@ -656,7 +656,8 @@ entries = []                  # your exceptions for domain/URL block feeds (doma
 enabled = false
 url = "${CROWDSEC_BLOCKLIST_URL}"
 headers = { Authorization = "Basic ${CROWDSEC_BASIC_AUTH}" }   # base64("user:password") from the console
-min_entries = 100
+refresh_minutes = 120         # be gentle: the integration endpoint rate-limits (HTTP 429)
+min_entries = 0               # empty until the integration is subscribed to blocklists
 
 
 # ======================================================================== service domains (allow)
