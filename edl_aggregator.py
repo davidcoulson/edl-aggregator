@@ -40,13 +40,14 @@ import time
 import tomllib
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from email.utils import formatdate, parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-__version__ = "1.5.0"
+__version__ = "1.5.1"
 
 log = logging.getLogger("edl-aggregator")
 USER_AGENT = f"edl-aggregator/{__version__} (+https://github.com/davidcoulson/edl-aggregator)"
@@ -65,6 +66,30 @@ def expand_env(value):
     if isinstance(value, dict):
         return {k: expand_env(v) for k, v in value.items()}
     return value
+
+
+def render_url(url: str) -> str:
+    """Fill time placeholders at fetch time: {days_ago:N} -> UTC timestamp N days ago (YYYY-MM-DDTHH:MM:SS)."""
+    return re.sub(r"\{days_ago:(\d+)\}", lambda m: (datetime.now(timezone.utc) - timedelta(days=int(m.group(1))))
+                  .strftime("%Y-%m-%dT%H:%M:%S"), url or "")
+
+
+RETRY_BACKOFF_SECONDS = 5
+
+
+def http_get(url: str, headers: dict, timeout: int, retries: int = 2):
+    """GET with retries on timeouts, connection errors and 5xx (not 4xx / 304). Returns (text, response headers)."""
+    for attempt in range(retries + 1):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=timeout) as resp:
+                return resp.read().decode("utf-8", "replace"), resp.headers
+        except urllib.error.HTTPError as e:
+            if e.code < 500 or attempt == retries:
+                raise
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError):
+            if attempt == retries:
+                raise
+        time.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1))
 
 
 # --------------------------------------------------------------------------- indicators
@@ -429,7 +454,7 @@ PARSERS = {
 }
 SOURCE_KEYS = {"url", "entries", "format", "type", "confidence", "min_entries", "enabled", "refresh_minutes",
                "headers", "max_shrink_percent", "description", "timeout", "dynamic", "expand_asns",
-               "asn_database", "asn_database_refresh_minutes", "next_page", "max_pages"}
+               "asn_database", "asn_database_refresh_minutes", "next_page", "max_pages", "retries"}
 
 
 # --------------------------------------------------------------------------- alerts
@@ -482,6 +507,7 @@ class Source:
         self.asn_db_refresh = float(cfg.get("asn_database_refresh_minutes", 1440))
         self.next_page = cfg.get("next_page")                  # json path to the next page's URL (paginated APIs)
         self.max_pages = int(cfg.get("max_pages", 100))
+        self.retries = int(cfg.get("retries", 2))
         self.opts = {k: v for k, v in cfg.items() if k not in SOURCE_KEYS}
         self.cache = data_dir / "cache" / f"{name}.txt"
         self.meta_file = data_dir / "cache" / f"{name}.json"
@@ -631,10 +657,8 @@ class Source:
         if self.items and self.meta.get("last_modified"):
             headers["If-Modified-Since"] = self.meta["last_modified"]
         try:
-            req = urllib.request.Request(self.url, headers=headers)
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                text = resp.read().decode("utf-8", "replace")
-                etag, last_mod = resp.headers.get("ETag"), resp.headers.get("Last-Modified")
+            text, rh = http_get(render_url(self.url), headers, self.timeout, self.retries)
+            etag, last_mod = rh.get("ETag"), rh.get("Last-Modified")
         except urllib.error.HTTPError as e:
             if e.code == 304:
                 self._mark_checked()
@@ -650,9 +674,7 @@ class Source:
             try:
                 nxt = next(iter(json_values(text, [self.next_page])), None)
                 while nxt and len(pages) < self.max_pages:
-                    req = urllib.request.Request(nxt, headers={"User-Agent": USER_AGENT, **self.headers})
-                    with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                        page = resp.read().decode("utf-8", "replace")
+                    page, _ = http_get(nxt, {"User-Agent": USER_AGENT, **self.headers}, self.timeout, self.retries)
                     pages.append(page)
                     nxt = next(iter(json_values(page, [self.next_page])), None)
             except Exception as e:
@@ -789,6 +811,7 @@ class Aggregator:
         safety = config.get("safety", {})
         self.server = config.get("server", {})
         self.api_token = expand_env(config.get("api", {}).get("token", ""))
+        self.parallel = max(1, int(config.get("parallel_fetches", 6)))
         self.defaults = {"refresh_minutes": float(config.get("refresh_minutes", 60)),
                          "max_shrink_percent": float(safety.get("max_shrink_percent", 50))}
         self.never_block = collapse_items("ip", (n for e in safety.get("never_block", []) for n in parse_ip(str(e))))
@@ -818,8 +841,12 @@ class Aggregator:
         for s in self.sources.values():
             if s.dynamic:
                 changed |= s.dyn_expire()
-            elif s.url and s.enabled and (force or s.due(now)):
-                changed |= s.refresh()
+        due = [s for s in self.sources.values() if not s.dynamic and s.url and s.enabled and (force or s.due(now))]
+        if due:   # download in parallel so one slow upstream doesn't hold up the rest
+            with ThreadPoolExecutor(max_workers=self.parallel, thread_name_prefix="fetch") as pool:
+                results = list(pool.map(lambda src: src.refresh(), due))
+            changed |= any(results)
+            for s in due:
                 self._check_alert(s)
         if changed or not self.published:
             self.rebuild()

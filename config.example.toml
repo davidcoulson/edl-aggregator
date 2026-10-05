@@ -7,6 +7,8 @@
 #   format              plain | hosts | csv | spamhaus-json | spamhaus-asn-json | dshield | aws-json | json
 #   column, min_column, min_value   csv only: value column (0-based); keep rows where min_column >= min_value
 #   next_page, max_pages   paginated JSON APIs: json path of the next page's URL (e.g. "next"), page limit (100)
+#   retries             retries per download/page on timeouts and 5xx (default 2)
+#   url placeholders    {days_ago:N} -> UTC timestamp N days ago, filled in at fetch time
 #   expand_asns         ip only: entries are ASNs, expanded to announced ranges via asn_database (ip2asn TSV;
 #                       default iptoasn.com, refreshed daily - asn_database_refresh_minutes)
 #   strip_scheme, max_length   url only: drop http(s):// (Palo Alto format, default true); skip longer (255)
@@ -33,6 +35,7 @@
 # [dynamic.<name>]  a list you change at runtime through the API (type = ip | domain | url); use it as a source.
 
 refresh_minutes = 60          # default per-source interval. Spamhaus asks for no more than one download per hour.
+parallel_fetches = 6          # sources downloaded at the same time
 
 [server]
 # Applies to every feed unless the feed sets its own, and to /status, /metrics, /lookup and the API.
@@ -162,9 +165,10 @@ min_entries = 1000
 refresh_minutes = 1440
 
 [sources.otx_ipv4]
-# AlienVault OTX: indicators from the pulses you subscribe to. Needs OTX_API_KEY (free account).
+# AlienVault OTX: indicators from the pulses you subscribe to, modified in the last 30 days. Needs OTX_API_KEY.
 enabled = false
-url = "https://otx.alienvault.com/api/v1/indicators/export?type=IPv4&limit=5000"
+url = "https://otx.alienvault.com/api/v1/indicators/export?types=IPv4&limit=5000&modified_since={days_ago:30}"
+timeout = 180
 headers = { X-OTX-API-KEY = "${OTX_API_KEY}" }
 format = "json"
 paths = ["results[].indicator"]
@@ -175,7 +179,8 @@ min_entries = 100
 
 [sources.otx_ipv6]
 enabled = false
-url = "https://otx.alienvault.com/api/v1/indicators/export?type=IPv6&limit=5000"
+url = "https://otx.alienvault.com/api/v1/indicators/export?types=IPv6&limit=5000&modified_since={days_ago:30}"
+timeout = 180
 headers = { X-OTX-API-KEY = "${OTX_API_KEY}" }
 format = "json"
 paths = ["results[].indicator"]
@@ -192,18 +197,19 @@ paths = ["relays[].exit_addresses[]", "relays[].or_addresses[]"]
 min_entries = 500
 
 [sources.abuseipdb_v4]
-# Needs a free AbuseIPDB key in the ABUSEIPDB_API_KEY environment variable. Free tier: 5 downloads/day.
+# Needs a free AbuseIPDB key in the ABUSEIPDB_API_KEY environment variable. Free tier: 5 downloads/day,
+# so v4 + v6 at 12 h each = 4/day.
 enabled = false
 url = "https://api.abuseipdb.com/api/v2/blacklist?confidenceMinimum=90&ipVersion=4&plaintext"
 headers = { Key = "${ABUSEIPDB_API_KEY}", Accept = "text/plain" }
-refresh_minutes = 360
+refresh_minutes = 720         # free tier: 5 blacklist downloads/day across both sources
 min_entries = 100
 
 [sources.abuseipdb_v6]
 enabled = false
 url = "https://api.abuseipdb.com/api/v2/blacklist?confidenceMinimum=90&ipVersion=6&plaintext"
 headers = { Key = "${ABUSEIPDB_API_KEY}", Accept = "text/plain" }
-refresh_minutes = 360
+refresh_minutes = 720         # free tier: 5 blacklist downloads/day across both sources
 min_entries = 10
 
 [sources.allowlist]
@@ -618,7 +624,8 @@ min_entries = 1000
 [sources.otx_domains]
 enabled = false
 type = "domain"
-url = "https://otx.alienvault.com/api/v1/indicators/export?type=domain&limit=5000"
+url = "https://otx.alienvault.com/api/v1/indicators/export?types=domain&limit=5000&modified_since={days_ago:30}"
+timeout = 180
 headers = { X-OTX-API-KEY = "${OTX_API_KEY}" }
 format = "json"
 paths = ["results[].indicator"]
@@ -630,7 +637,8 @@ min_entries = 100
 [sources.otx_urls]
 enabled = false
 type = "url"
-url = "https://otx.alienvault.com/api/v1/indicators/export?type=URL&limit=5000"
+url = "https://otx.alienvault.com/api/v1/indicators/export?types=URL&limit=5000&modified_since={days_ago:30}"
+timeout = 180
 headers = { X-OTX-API-KEY = "${OTX_API_KEY}" }
 format = "json"
 paths = ["results[].indicator"]

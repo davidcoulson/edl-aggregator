@@ -105,7 +105,9 @@ sources = ["github_hooks"]
 Source formats: `plain`, `hosts` (hosts-file), `csv` (`column`, optional `min_column`/`min_value` threshold),
 `spamhaus-json`, `spamhaus-asn-json`, `dshield`, `aws-json` (`service`, `region`), and `json` with `paths`
 (`"prefixes[].ipv6Prefix"`, `"[].ips[]"`; `[]` iterates a list) and an optional `where` filter; paginated JSON APIs
-are followed with `next_page = "next"` (path of the next page's URL) and `max_pages`. Entries may be IPs,
+are followed with `next_page = "next"` (path of the next page's URL) and `max_pages`. URLs may contain `{days_ago:N}`
+(filled in at fetch time, e.g. OTX's `modified_since`). Each download and page is retried (`retries`, default 2) on
+timeouts and 5xx responses, and up to `parallel_fetches` sources (default 6) download at the same time. Entries may be IPs,
 CIDRs, `a-b` ranges, `[v6]:port` or `v4:port`.
 
 ## ASN expansion

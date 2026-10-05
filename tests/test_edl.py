@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import edl_aggregator as e  # noqa: E402
 
 N = ipaddress.ip_network
+e.RETRY_BACKOFF_SECONDS = 0          # no waiting between retries in tests
 EXAMPLE = Path(e.__file__).with_name("config.example.toml")
 
 
@@ -247,6 +248,72 @@ class PaginationAndStatusTests(unittest.TestCase):
                 self.assertEqual(fresh.get("f").text, "192.0.2.1/32\n")
         finally:
             up.close()
+
+
+class FetchRobustnessTests(unittest.TestCase):
+    def test_days_ago_placeholder(self):
+        from datetime import datetime, timedelta, timezone
+        got = e.render_url("https://x/export?since={days_ago:30}&a=1")
+        stamp = got.split("since=")[1].split("&")[0]
+        when = datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        self.assertLess(abs((datetime.now(timezone.utc) - timedelta(days=30) - when).total_seconds()), 5)
+        self.assertEqual(e.render_url("https://x/plain"), "https://x/plain")
+
+    def test_retries_on_5xx_then_succeeds(self):
+        calls = {"n": 0}
+
+        class H(BaseHTTPRequestHandler):
+            def do_GET(self):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    self.send_response(502); self.end_headers(); return
+                body = b"192.0.2.9\n"
+                self.send_response(200); self.send_header("Content-Length", str(len(body))); self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            cfg = {"sources": {"s": {"url": f"http://127.0.0.1:{srv.server_port}/x"}}, "feeds": {"f": {"sources": ["s"]}}}
+            with tempfile.TemporaryDirectory() as d:
+                agg = make(cfg, d)
+                agg.tick(force=True)
+                self.assertTrue(agg.sources["s"].status["ok"])
+                self.assertEqual(calls["n"], 2)
+                self.assertEqual(agg.get("f").text, "192.0.2.9/32\n")
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_sources_refresh_in_parallel(self):
+        class Slow(BaseHTTPRequestHandler):
+            def do_GET(self):
+                time.sleep(1.0)
+                body = f"192.0.2.{len(self.path)}\n".encode()
+                self.send_response(200); self.send_header("Content-Length", str(len(body))); self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), Slow)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{srv.server_port}"
+        try:
+            cfg = {"sources": {f"s{i}": {"url": f"{base}/{'x' * i}"} for i in range(1, 5)},
+                   "feeds": {"f": {"sources": [f"s{i}" for i in range(1, 5)]}}}
+            with tempfile.TemporaryDirectory() as d:
+                agg = make(cfg, d)
+                t0 = time.time()
+                agg.tick(force=True)
+                self.assertLess(time.time() - t0, 3.0)        # 4 x 1 s sequential would be >= 4 s
+                self.assertTrue(all(agg.sources[f"s{i}"].status["ok"] for i in range(1, 5)))
+        finally:
+            srv.shutdown()
+            srv.server_close()
 
 
 class SetTests(unittest.TestCase):
