@@ -1,4 +1,4 @@
-FROM python:3.13-alpine
+FROM python:3.14-alpine
 
 LABEL org.opencontainers.image.title="edl-aggregator" \
       org.opencontainers.image.description="Merge IP threat feeds (Spamhaus DROP, DShield, AWS ranges, plain lists) and serve them as firewall External Dynamic Lists. A lightweight MineMeld replacement." \
