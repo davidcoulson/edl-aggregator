@@ -2,6 +2,8 @@ import base64
 import ipaddress
 import json
 import os
+import socket
+import ssl
 import sys
 import tempfile
 import threading
@@ -605,6 +607,126 @@ class ReloadTests(unittest.TestCase):
         bad = Path(tempfile.mkdtemp()) / "bad.toml"
         bad.write_text('[feeds.f]\nsources = ["nope"]\n')
         self.assertEqual(e.main(["--check", "--config", str(bad)]), 1)
+
+
+class ScanFixTests(unittest.TestCase):
+    def test_control_characters_rejected_for_every_type(self):
+        self.assertEqual(e.to_items("url", ["evil.test/a\ngoogle.com/", "evil.test/\ud800", "ok.test/a"], {}), ["ok.test/a"])
+        self.assertEqual(e.to_items("domain", ["google.com\n/x", "ok.test"], {}), ["ok.test"])
+        self.assertEqual(e.to_items("ip", ["2000::%\n10.0.0.0/8", "fc00::%x/7", "10.0.0.1"], {}), [N("10.0.0.1/32")])
+
+    def test_pagination_stays_on_source_origin(self):
+        up = Upstream()
+        try:
+            up.body = json.dumps({"r": ["192.0.2.1"], "next": "file:///etc/passwd"})
+            cfg = {"sources": {"o": {"url": up.url, "format": "json", "paths": ["r[]"], "next_page": "next"}},
+                   "feeds": {"f": {"sources": ["o"]}}}
+            with tempfile.TemporaryDirectory() as d:
+                agg = make(cfg, d)
+                agg.tick(force=True)
+                self.assertIn("leaves the source origin", agg.sources["o"].status["error"])
+                up.body = json.dumps({"r": ["192.0.2.1"], "next": "http://127.0.0.1:9/x"})
+                agg.tick(force=True)
+                self.assertIn("leaves the source origin", agg.sources["o"].status["error"])
+        finally:
+            up.close()
+
+    def test_status_hides_url_secrets(self):
+        self.assertEqual(e.origin("https://u:p@h.test:8443/data/KEY/x?k=KEY"), "https://h.test:8443")
+        cfg = {"sources": {"s": {"url": "http://127.0.0.1:9/data/SECRET/feed?key=SECRET"}}, "feeds": {"f": {"sources": ["s"]}}}
+        with tempfile.TemporaryDirectory() as d:
+            self.assertNotIn("SECRET", json.dumps(make(cfg, d).status()))
+
+    def test_wildcard_and_parent_of_protected_domain_removed(self):
+        self.assertEqual(e.exclude_items("url", ["google.com/*", "google.com/^", "google.com/a"], [], ["google.com"]),
+                         ["google.com/a"])
+        self.assertEqual(e.normalize_url("Google.com./"), "google.com/")
+        self.assertEqual(e.exclude_items("domain", ["example.com", "other.test"], [], ["app.example.com"]), ["other.test"])
+
+    def test_empty_asn_expansion_is_a_failure(self):
+        asn_up, db_up = Upstream(), Upstream()
+        try:
+            asn_up.body = json.dumps({"asn": 64500}) + "\n"
+            db_up.body = "".join(f"10.{i}.0.0\t10.{i}.0.255\t{i + 1}\tUS\tX\n" for i in range(1100))
+            cfg = {"sources": {"a": {"url": asn_up.url, "format": "spamhaus-asn-json", "asn_database": db_up.url}},
+                   "feeds": {"f": {"sources": ["a"]}}}
+            with tempfile.TemporaryDirectory() as d:
+                agg = make(cfg, d)
+                agg.tick(force=True)
+                self.assertFalse(agg.sources["a"].status["ok"])
+                self.assertEqual(agg.get("f").count, 0)
+        finally:
+            asn_up.close()
+            db_up.close()
+
+    def test_cache_write_failure_is_retried(self):
+        up = Upstream()
+        try:
+            up.body = "192.0.2.1\n"
+            cfg = {"sources": {"s": {"url": up.url}}, "feeds": {"f": {"sources": ["s"]}}}
+            with tempfile.TemporaryDirectory() as d:
+                agg = make(cfg, d)
+                (Path(d) / "cache" / "s.tmp").mkdir()          # the cache write fails
+                agg.tick(force=True)
+                self.assertFalse(agg.sources["s"].status["ok"])
+                (Path(d) / "cache" / "s.tmp").rmdir()
+                agg.tick(force=True)
+                self.assertEqual(agg.get("f").text, "192.0.2.1/32\n")
+        finally:
+            up.close()
+
+    def test_paginated_source_ignores_validators_and_disabled_excludes_are_ignored(self):
+        cfg = {"sources": {"a": {"entries": ["192.0.2.0/24"]}, "off": {"entries": ["192.0.2.0/24"], "enabled": False}},
+               "feeds": {"f": {"sources": ["a"], "exclude": ["off"]}}}
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(make(cfg, d).get("f").text, "192.0.2.0/24\n")
+        up = Upstream()
+        try:
+            up.body = json.dumps({"r": ["192.0.2.1"], "next": None})
+            cfg = {"sources": {"o": {"url": up.url, "format": "json", "paths": ["r[]"], "next_page": "next"}},
+                   "feeds": {"f": {"sources": ["o"]}}}
+            with tempfile.TemporaryDirectory() as d:
+                agg = make(cfg, d)
+                agg.tick(force=True)
+                agg.tick(force=True)
+                self.assertNotIn("If-None-Match", up.last_headers)
+        finally:
+            up.close()
+
+    def test_changed_url_drops_validators_and_shrink_baseline(self):
+        up = Upstream()
+        try:
+            up.body = "".join(f"198.51.100.{i}\n" for i in range(100))
+            cfg = {"sources": {"s": {"url": up.url}}, "feeds": {"f": {"sources": ["s"]}}}
+            with tempfile.TemporaryDirectory() as d:
+                make(cfg, d).tick(force=True)
+                up.body = "198.51.100.1\n"
+                cfg["sources"]["s"]["url"] += "?other=1"
+                agg = make(cfg, d)
+                agg.tick(force=True)
+                self.assertTrue(agg.sources["s"].status["ok"], agg.sources["s"].status["error"])
+                self.assertEqual(up.last_headers.get("If-None-Match"), None)
+        finally:
+            up.close()
+
+    def test_idle_tls_client_does_not_block_others(self):
+        with tempfile.TemporaryDirectory() as d:
+            agg = make({"sources": {"s": {"entries": ["192.0.2.1"]}}, "feeds": {"f": {"sources": ["s"]}}}, d)
+            with socket.socket() as probe:
+                probe.bind(("127.0.0.1", 0))
+                port = probe.getsockname()[1]
+            threading.Thread(target=e.serve, args=(agg, 0, port, Path(d) / "c.crt", Path(d) / "c.key"), daemon=True).start()
+            for _ in range(50):
+                try:
+                    idle = socket.create_connection(("127.0.0.1", port))
+                    break
+                except OSError:
+                    time.sleep(0.1)
+            ctx = ssl.create_default_context()
+            ctx.check_hostname, ctx.verify_mode = False, ssl.CERT_NONE
+            with urllib.request.urlopen(f"https://127.0.0.1:{port}/feeds/f", context=ctx, timeout=5) as r:
+                self.assertEqual(r.read(), b"192.0.2.1/32\n")
+            idle.close()
 
 
 if __name__ == "__main__":
