@@ -74,6 +74,12 @@ def render_url(url: str) -> str:
                   .strftime("%Y-%m-%dT%H:%M:%S"), url or "")
 
 
+def origin(url: str) -> str:
+    """scheme://host[:port] only: paths, queries and userinfo of source URLs can carry API keys."""
+    u = urlsplit(url or "")
+    return f"{u.scheme}://{u.hostname}" + (f":{u.port}" if u.port else "") if u.hostname else ""
+
+
 RETRY_BACKOFF_SECONDS = 5
 
 
@@ -145,7 +151,7 @@ def normalize_url(token: str, strip_scheme: bool = True, max_length: int = 255) 
     host, sep, rest = u.partition("/")
     if not host:
         raise ValueError(f"no host: {token!r}")
-    u = host.lower() + sep + rest
+    u = host.lower().rstrip(".") + sep + rest
     if not strip_scheme and scheme:
         u = f"{scheme}://{u}"
     if max_length and len(u) > max_length:
@@ -165,10 +171,15 @@ def domain_covers(parent: str, child: str) -> bool:
     return child == parent or child.endswith("." + parent)
 
 
+BAD_TOKEN_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff]")   # control chars, line breaks, surrogates
+
+
 def to_items(itype: str, tokens, opts: dict) -> list:
     out = []
     for t in tokens:
         try:
+            if BAD_TOKEN_RE.search(t.strip()) or (itype == "ip" and "%" in t):   # one token must stay one output line
+                raise ValueError("control character in token")
             if itype == "ip":
                 out.extend(parse_ip(t))
             elif itype == "domain":
@@ -232,8 +243,8 @@ def exclude_items(itype: str, items: list, excludes: list, never_domains: list[s
             continue
         if itype == "url" and any(it.startswith(p) for p in prefixes):
             continue
-        bare = itype == "domain" or it.split("/", 1)[1:] in ([], [""])
-        if bare and any(domain_covers(d, host) for d in never_domains):
+        bare = itype == "domain" or it.partition("/")[2].strip("*^") == ""   # "google.com/*" is the whole host
+        if bare and any(domain_covers(d, host) or domain_covers(host, d) for d in never_domains):
             continue
         out.append(it)
     return out
@@ -516,10 +527,11 @@ class Source:
         self.items: list = []
         self.meta: dict = {}
         self.failures = 0
+        self.cfg_changed = False                               # loaded cache was fetched with another url/options
         self.last_attempt = 0.0
         self.lock = threading.Lock()
         self.dyn: dict[str, dict] = {}                         # dynamic: entry -> {added, expires, comment}
-        self.status = {"name": name, "type": self.type, "url": self.url, "enabled": self.enabled,
+        self.status = {"name": name, "type": self.type, "url": origin(self.url), "enabled": self.enabled,
                        "dynamic": self.dynamic, "ok": None, "count": 0, "fetched_at": None, "checked_at": None,
                        "error": None, "consecutive_failures": 0}
         if self.type not in TYPES:
@@ -548,7 +560,13 @@ class Source:
 
     def _from_lines(self, lines) -> list:
         if self.type == "ip":
-            return [ipaddress.ip_network(l) for l in lines if l]
+            out = []
+            for l in lines:
+                try:
+                    out.append(ipaddress.ip_network(l))
+                except ValueError:      # a bad line (older caches) must not stop start-up
+                    log.warning("source %s: ignoring bad cache line %r", self.name, l)
+            return out
         return [l for l in lines if l]
 
     def _load_cache(self):
@@ -564,6 +582,13 @@ class Source:
             self.status["checked_at"] = self.meta.get("checked_at")
             if self.items and self.meta.get("checked_at"):
                 self.status["ok"] = True
+            if self.meta.get("sig", self._sig()) != self._sig():   # url/format/options changed: old validators and size are void
+                self.meta.pop("etag", None)
+                self.meta.pop("last_modified", None)
+                self.cfg_changed = True
+
+    def _sig(self) -> str:
+        return json.dumps([self.url, self.format, self.opts], sort_keys=True, default=str)
 
     def _load_static(self):
         self.items = collapse_items(self.type, to_items(self.type, [str(e) for e in self.entries_static], self.opts))
@@ -655,9 +680,10 @@ class Source:
         """Download, parse and validate. Returns True if the source's data changed."""
         self.last_attempt = time.time()
         headers = {"User-Agent": USER_AGENT, **self.headers}
-        if self.items and self.meta.get("etag"):
+        validators = self.items and not self.next_page         # page 1's validator says nothing about later pages
+        if validators and self.meta.get("etag"):
             headers["If-None-Match"] = self.meta["etag"]
-        if self.items and self.meta.get("last_modified"):
+        if validators and self.meta.get("last_modified"):
             headers["If-Modified-Since"] = self.meta["last_modified"]
         try:
             text, rh = http_get(render_url(self.url), headers, self.timeout, self.retries)
@@ -683,6 +709,9 @@ class Source:
             try:
                 nxt = next(iter(json_values(text, [self.next_page])), None)
                 while nxt and len(pages) < self.max_pages:
+                    a, b = urlsplit(render_url(self.url)), urlsplit(str(nxt))   # the upstream picks this URL: keep it on-origin
+                    if b.scheme not in ("http", "https") or (a.scheme, a.netloc.lower()) != (b.scheme, b.netloc.lower()):
+                        raise ValueError(f"next URL leaves the source origin: {nxt!r}")
                     page, _ = http_get(nxt, {"User-Agent": USER_AGENT, **self.headers}, self.timeout, self.retries)
                     pages.append(page)
                     nxt = next(iter(json_values(page, [self.next_page])), None)
@@ -695,6 +724,8 @@ class Source:
             if self.expand_asns:
                 tokens = asn_ranges(tokens, self.asn_db_url, self.cache.parent, self.asn_db_refresh, self.timeout)
             parsed = to_items(self.type, tokens, self.opts)
+            if self.expand_asns and raw_tokens and not parsed:
+                raise ValueError("the ASN database has no ranges for the listed ASNs")
         except Exception as e:
             self._fail(f"parse error: {type(e).__name__}: {e}")
             return False
@@ -704,20 +735,26 @@ class Source:
         if raw < self.min_entries:
             self._fail(f"only {raw} entries (min_entries={self.min_entries})")
             return False
-        old = self.meta.get("raw_count") or len(self.items)
+        old = 0 if self.cfg_changed else self.meta.get("raw_count") or len(self.items)
         if old and self.max_shrink < 100 and raw < old * (1 - self.max_shrink / 100):
             self._fail(f"shrank from {old} to {raw} entries (more than max_shrink_percent={self.max_shrink:g})")
             return False
         items = collapse_items(self.type, parsed)
         changed = items != self.items
+        try:   # commit to memory only once the cache is on disk, so a full disk is retried instead of lost
+            if changed:
+                tmp = self.cache.with_suffix(".tmp")
+                tmp.write_text("".join(f"{i}\n" for i in items))
+                tmp.replace(self.cache)
+                self.meta["fetched_at"] = now_iso()
+            self.meta.update(etag=etag, last_modified=last_mod, count=len(items), raw_count=raw, url=self.url,
+                             sig=self._sig())
+            self._mark_checked()
+        except OSError as e:
+            self._fail(f"cannot write cache: {e}")
+            return False
         self.items = items
-        if changed:
-            tmp = self.cache.with_suffix(".tmp")
-            tmp.write_text("".join(f"{i}\n" for i in items))
-            tmp.replace(self.cache)
-            self.meta["fetched_at"] = now_iso()
-        self.meta.update(etag=etag, last_modified=last_mod, count=len(items), raw_count=raw, url=self.url)
-        self._mark_checked()
+        self.cfg_changed = False
         self.status.update(fetched_at=self.meta.get("fetched_at"), count=len(items))
         log.info("source %s: %d %s entries%s", self.name, len(items), self.type, "" if changed else " (unchanged)")
         return changed
@@ -780,7 +817,7 @@ class Feed:
         if self.type == "ip" and self.family != "both":
             want = 4 if self.family == "ipv4" else 6
             items = [n for n in items if n.version == want]
-        excl = [i for s in self.excludes for i in sources[s].items]
+        excl = [i for s in self.excludes if sources[s].enabled for i in sources[s].items]
         if self.type == "ip":
             excl = [i for i in excl if not isinstance(i, str)]
             if self.kind == "block":
@@ -835,6 +872,7 @@ class Aggregator:
         self.sources = {n: Source(n, c, data_dir, self.defaults) for n, c in srcs.items()}
         self.feeds = {n: Feed(n, c, self.sources, self.server) for n, c in config.get("feeds", {}).items()}
         self.lock = threading.Lock()
+        self.rebuild_lock = threading.Lock()
         self.published: dict[str, Published] = {}     # feed name -> build
         self.names: dict[str, str] = {}               # feed name or alias -> feed name
         self.last_build = None
@@ -872,6 +910,10 @@ class Aggregator:
             self.alerter.send(f"edl-aggregator: source {s.name} recovered", f"{len(s.items)} entries.", "success")
 
     def rebuild(self):
+        with self.rebuild_lock:   # an older snapshot must not be published after a newer one
+            self._rebuild()
+
+    def _rebuild(self):
         published, names = {}, {}
         for name, feed in self.feeds.items():
             items = feed.build(self.sources, self.never_block, self.never_block_domains)
@@ -934,8 +976,9 @@ class Aggregator:
             out["never_block"] = bool(item_matches("ip", self.never_block, q))
         else:   # same rule as the feeds: URLs are only protected when they are a bare host
             host = q if qtype == "domain" else url_host(q)
-            bare = qtype == "domain" or q.split("/", 1)[1:] in ([], [""])
-            out["never_block"] = bare and any(domain_covers(d, host) for d in self.never_block_domains)
+            bare = qtype == "domain" or q.partition("/")[2].strip("*^") == ""
+            out["never_block"] = bare and any(domain_covers(d, host) or domain_covers(host, d)
+                                              for d in self.never_block_domains)
         return out
 
     def status(self) -> dict:
@@ -1034,6 +1077,7 @@ def make_handler(runtime):
 
     class Handler(BaseHTTPRequestHandler):
         server_version = f"edl-aggregator/{__version__}"
+        timeout = 30   # idle or half-open clients must not hold a thread (or the TLS handshake) forever
 
         def _send(self, code: int, body: bytes | str, ctype="text/plain; charset=utf-8", headers=None):
             data = body.encode() if isinstance(body, str) else body
@@ -1226,11 +1270,16 @@ def serve(runtime, http_port: int, https_port: int, cert: Path, key: Path):
         log.info("HTTP on :%d", http_port)
     if https_port:
         ensure_cert(cert, key)
-        s = ThreadingHTTPServer(("", https_port), make_handler(runtime))
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         ctx.load_cert_chain(cert, key)
-        s.socket = ctx.wrap_socket(s.socket, server_side=True)
+
+        class TLSServer(ThreadingHTTPServer):
+            def get_request(self):   # handshake in the handler thread (with its timeout), not in accept()
+                sock, addr = super().get_request()
+                return ctx.wrap_socket(sock, server_side=True, do_handshake_on_connect=False), addr
+
+        s = TLSServer(("", https_port), make_handler(runtime))
         servers.append(s)
         log.info("HTTPS on :%d", https_port)
     if not servers:
